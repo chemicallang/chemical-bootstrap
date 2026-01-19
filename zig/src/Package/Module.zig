@@ -178,7 +178,7 @@ pub fn create(arena: Allocator, options: CreateOptions) !*Package.Module {
                 return error.PieRequiresPic;
             break :b true;
         }
-        if (options.global.link_mode == .dynamic) {
+        if (options.global.link_mode == .dynamic and target_util.requiresPicForDynamicLink(target)) {
             if (options.inherited.pic == false)
                 return error.DynamicLinkingRequiresPic;
             break :b true;
@@ -342,6 +342,9 @@ pub fn create(arena: Allocator, options: CreateOptions) !*Package.Module {
                 // Ignore these until we figure out how to handle the concept of omitting features.
                 // See https://github.com/ziglang/zig/issues/23539
                 if (target_util.isDynamicAMDGCNFeature(target, feature)) continue;
+
+                if (target.cpu.arch.isPowerPC() and @as(std.Target.powerpc.Feature, @enumFromInt(feature.index)) == .@"64bit") continue;
+                if (target.cpu.arch.isX86() and @as(std.Target.x86.Feature, @enumFromInt(feature.index)) == .x32) continue;
 
                 var is_enabled = target.cpu.features.isEnabled(feature.index);
                 if (target.cpu.arch == .s390x and @as(std.Target.s390x.Feature, @enumFromInt(feature.index)) == .backchain) {

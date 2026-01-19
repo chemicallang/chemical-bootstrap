@@ -278,7 +278,7 @@ pub fn flush(
     };
     result catch |err| switch (err) {
         error.OutOfMemory, error.LinkFailure => |e| return e,
-        else => |e| return lld.base.comp.link_diags.fail("failed to link with LLD: {s}", .{@errorName(e)}),
+        else => |e| return lld.base.comp.link_diags.fail("failed to link with LLD: {t}", .{e}),
     };
 }
 
@@ -626,17 +626,7 @@ fn coffLink(lld: *Lld, arena: Allocator) !void {
                             try argv.append("-ALTERNATENAME:__image_base__=__ImageBase");
                         }
 
-                        if (is_dyn_lib) {
-                            try argv.append(try comp.crtFileAsString(arena, "dllcrt2.obj"));
-                            if (target.cpu.arch == .x86) {
-                                try argv.append("-ALTERNATENAME:__DllMainCRTStartup@12=_DllMainCRTStartup@12");
-                            } else {
-                                try argv.append("-ALTERNATENAME:_DllMainCRTStartup=DllMainCRTStartup");
-                            }
-                        } else {
-                            try argv.append(try comp.crtFileAsString(arena, "crt2.obj"));
-                        }
-
+                        try argv.append(try comp.crtFileAsString(arena, if (is_dyn_lib) "dllcrt2.obj" else "crt2.obj"));
                         try argv.append(try comp.crtFileAsString(arena, "libmingw32.lib"));
                     } else {
                         try argv.append(switch (comp.config.link_mode) {
@@ -801,7 +791,8 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
             target.cpu.arch == .m68k or
             target.cpu.arch.isSPARC() or
             target.cpu.arch == .ve or
-            target.cpu.arch == .xcore))
+            target.cpu.arch == .xcore or
+            target.cpu.arch == .xtensa))
     {
         // In this case we must do a simple file copy
         // here. TODO: think carefully about how we can avoid this redundant operation when doing
@@ -1630,7 +1621,11 @@ fn spawnLld(comp: *Compilation, arena: Allocator, argv: []const []const u8) !voi
         }) catch |err| break :term err;
 
         var stderr_reader = child.stderr.?.readerStreaming(io, &.{});
-        stderr = try stderr_reader.interface.allocRemaining(gpa, .unlimited);
+        stderr = stderr_reader.interface.allocRemaining(gpa, .unlimited) catch |err| switch (err) {
+            error.StreamTooLong => unreachable, // unlimited
+            error.OutOfMemory => |e| return e,
+            error.ReadFailed => return stderr_reader.err.?,
+        };
         break :term child.wait(io);
     }) catch |first_err| term: {
         const err = switch (first_err) {
@@ -1682,7 +1677,11 @@ fn spawnLld(comp: *Compilation, arena: Allocator, argv: []const []const u8) !voi
                     break :term rsp_child.wait(io) catch |err| break :err err;
                 } else {
                     var stderr_reader = rsp_child.stderr.?.readerStreaming(io, &.{});
-                    stderr = try stderr_reader.interface.allocRemaining(gpa, .unlimited);
+                    stderr = stderr_reader.interface.allocRemaining(gpa, .unlimited) catch |err| switch (err) {
+                        error.StreamTooLong => unreachable, // unlimited
+                        error.OutOfMemory => |e| return e,
+                        error.ReadFailed => return stderr_reader.err.?,
+                    };
                     break :term rsp_child.wait(io) catch |err| break :err err;
                 }
             },
@@ -1699,9 +1698,17 @@ fn spawnLld(comp: *Compilation, arena: Allocator, argv: []const []const u8) !voi
             diags.lockAndParseLldStderr(argv[1], stderr);
             return error.LinkFailure;
         },
-        else => {
+        .signal => |sig| {
             if (comp.clang_passthrough_mode) std.process.abort();
-            return diags.fail("{s} terminated with stderr:\n{s}", .{ argv[0], stderr });
+            return diags.fail("{s} terminated with signal {t} and stderr:\n{s}", .{ argv[0], sig, stderr });
+        },
+        .stopped => |sig| {
+            if (comp.clang_passthrough_mode) std.process.abort();
+            return diags.fail("{s} stopped with signal {d} and stderr:\n{s}", .{ argv[0], sig, stderr });
+        },
+        .unknown => |code| {
+            if (comp.clang_passthrough_mode) std.process.abort();
+            return diags.fail("{s} terminated for unknown reason with code {d} and stderr:\n{s}", .{ argv[0], code, stderr });
         },
     }
 

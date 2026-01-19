@@ -2,6 +2,9 @@ const common = @import("./common.zig");
 const truncf = @import("./truncf.zig").truncf;
 
 comptime {
+    if (common.want_ppc_abi) {
+        @export(&__trunctfhf2, .{ .name = "__trunckfhf2", .linkage = common.linkage, .visibility = common.visibility });
+    }
     @export(&__trunctfhf2, .{ .name = "__trunctfhf2", .linkage = common.linkage, .visibility = common.visibility });
 }
 

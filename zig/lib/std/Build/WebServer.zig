@@ -24,7 +24,7 @@ time_report_update_times: []i64,
 
 build_status: std.atomic.Value(abi.BuildStatus),
 /// When an event occurs which means WebSocket clients should be sent updates, call `notifyUpdate`
-/// to increment this value. Each client thread waits for this increment with `std.Thread.Futex`, so
+/// to increment this value. Each client thread waits for this increment with `Io.futexWaitTimeout`, so
 /// `notifyUpdate` will wake those threads. Updates are sent on a short interval regardless, so it
 /// is recommended to only use `notifyUpdate` for changes which the user should see immediately. For
 /// instance, we do not call `notifyUpdate` when the number of "unique runs" in the fuzzer changes,
@@ -46,7 +46,7 @@ pub const base_clock: Io.Clock = .awake;
 /// Thread-safe. Triggers updates to be sent to connected WebSocket clients; see `update_id`.
 pub fn notifyUpdate(ws: *WebServer) void {
     _ = ws.update_id.rmw(.Add, 1, .release);
-    std.Thread.Futex.wake(&ws.update_id, 16);
+    ws.graph.io.futexWake(u32, &ws.update_id.raw, 16);
 }
 
 pub const Options = struct {
@@ -377,7 +377,20 @@ fn serveWebSocket(ws: *WebServer, sock: *http.Server.WebSocket) !noreturn {
         }
 
         prev_time = start_time;
-        std.Thread.Futex.timedWait(&ws.update_id, start_update_id, std.time.ns_per_ms * default_update_interval_ms) catch {};
+
+        const old_cp = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(old_cp);
+        io.futexWaitTimeout(
+            u32,
+            &ws.update_id.raw,
+            start_update_id,
+            .{ .duration = .{
+                .clock = .awake,
+                .raw = .fromMilliseconds(default_update_interval_ms),
+            } },
+        ) catch |err| switch (err) {
+            error.Canceled => unreachable,
+        };
     }
 }
 fn recvWebSocketMessages(ws: *WebServer, sock: *http.Server.WebSocket) void {
@@ -575,11 +588,12 @@ fn buildClientWasm(ws: *WebServer, arena: Allocator, optimize: std.builtin.Optim
     });
     defer child.kill(io);
 
-    var poller = Io.poll(gpa, enum { stdout, stderr }, .{
-        .stdout = child.stdout.?,
-        .stderr = child.stderr.?,
-    });
-    defer poller.deinit();
+    var stderr_task = try io.concurrent(readStreamAlloc, .{ gpa, io, child.stderr.?, .unlimited });
+    defer if (stderr_task.cancel(io)) |slice| gpa.free(slice) else |_| {};
+
+    var stdout_buffer: [512]u8 = undefined;
+    var stdout_reader: Io.File.Reader = .initStreaming(child.stdout.?, io, &stdout_buffer);
+    const stdout = &stdout_reader.interface;
 
     try child.stdin.?.writeStreamingAll(io, @ptrCast(@as([]const std.zig.Client.Message.Header, &.{
         .{ .tag = .update, .bytes_len = 0 },
@@ -587,16 +601,17 @@ fn buildClientWasm(ws: *WebServer, arena: Allocator, optimize: std.builtin.Optim
     })));
 
     const Header = std.zig.Server.Message.Header;
+
     var result: ?Cache.Path = null;
     var result_error_bundle = std.zig.ErrorBundle.empty;
+    var body_buffer: std.ArrayList(u8) = .empty;
+    defer body_buffer.deinit(gpa);
 
-    const stdout = poller.reader(.stdout);
-
-    poll: while (true) {
-        while (stdout.buffered().len < @sizeOf(Header)) if (!(try poller.poll())) break :poll;
-        const header = stdout.takeStruct(Header, .little) catch unreachable;
-        while (stdout.buffered().len < header.bytes_len) if (!try poller.poll()) break :poll;
-        const body = stdout.take(header.bytes_len) catch unreachable;
+    while (true) {
+        const header = try stdout.takeStruct(Header, .little);
+        body_buffer.clearRetainingCapacity();
+        try stdout.appendExact(gpa, &body_buffer, header.bytes_len);
+        const body = body_buffer.items;
 
         switch (header.tag) {
             .zig_version => {
@@ -623,7 +638,7 @@ fn buildClientWasm(ws: *WebServer, arena: Allocator, optimize: std.builtin.Optim
         }
     }
 
-    const stderr_contents = try poller.toOwnedSlice(.stderr);
+    const stderr_contents = try stderr_task.await(io);
     if (stderr_contents.len > 0) {
         std.debug.print("{s}", .{stderr_contents});
     }
@@ -682,6 +697,14 @@ fn buildClientWasm(ws: *WebServer, arena: Allocator, optimize: std.builtin.Optim
         .output_mode = .Exe,
     });
     return base_path.join(arena, bin_name);
+}
+
+fn readStreamAlloc(gpa: Allocator, io: Io, file: Io.File, limit: Io.Limit) ![]u8 {
+    var file_reader: Io.File.Reader = .initStreaming(file, io, &.{});
+    return file_reader.interface.allocRemaining(gpa, limit) catch |err| switch (err) {
+        error.ReadFailed => return file_reader.err.?,
+        else => |e| return e,
+    };
 }
 
 pub fn updateTimeReportCompile(ws: *WebServer, opts: struct {

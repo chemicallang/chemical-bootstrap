@@ -392,6 +392,8 @@ pub const FILE = struct {
         Characteristics: ULONG,
     };
 
+    pub const USE_FILE_POINTER_POSITION = -2;
+
     // ref: um/WinBase.h
 
     pub const ATTRIBUTE_TAG_INFO = extern struct {
@@ -466,9 +468,11 @@ pub const FILE = struct {
     pub const CREATE_DISPOSITION = enum(ULONG) {
         /// If the file already exists, replace it with the given file. If it does not, create the given file.
         SUPERSEDE = 0x00000000,
-        /// If the file already exists, open it instead of creating a new file. If it does not, fail the request and do not create a new file.
+        /// If the file already exists, open it instead of creating a new file.
+        /// If it does not, fail the request and do not create a new file.
         OPEN = 0x00000001,
-        /// If the file already exists, fail the request and do not create or open the given file. If it does not, create the given file.
+        /// If the file already exists, fail the request and do not create or
+        /// open the given file. If it does not, create the given file.
         CREATE = 0x00000002,
         /// If the file already exists, open it. If it does not, create the given file.
         OPEN_IF = 0x00000003,
@@ -482,75 +486,122 @@ pub const FILE = struct {
 
     /// Define the create/open option flags
     pub const MODE = packed struct(ULONG) {
-        /// The file being created or opened is a directory file. With this flag, the CreateDisposition parameter must be set to `.CREATE`, `.FILE_OPEN`, or `.OPEN_IF`.
-        /// With this flag, other compatible CreateOptions flags include only the following: `SYNCHRONOUS_IO`, `WRITE_THROUGH`, `OPEN_FOR_BACKUP_INTENT`, and `OPEN_BY_FILE_ID`.
+        /// The file being created or opened is a directory file. With this
+        /// flag, the CreateDisposition parameter must be set to `.CREATE`,
+        /// `.FILE_OPEN`, or `.OPEN_IF`. With this flag, other compatible
+        /// CreateOptions flags include only the following: `SYNCHRONOUS_IO`,
+        /// `WRITE_THROUGH`, `OPEN_FOR_BACKUP_INTENT`, and `OPEN_BY_FILE_ID`.
         DIRECTORY_FILE: bool = false,
-        /// Applications that write data to the file must actually transfer the data into the file before any requested write operation is considered complete.
-        /// This flag is automatically set if the CreateOptions flag `NO_INTERMEDIATE_BUFFERING` is set.
+        /// Applications that write data to the file must actually transfer the
+        /// data into the file before any requested write operation is
+        /// considered complete. This flag is automatically set if the
+        /// CreateOptions flag `NO_INTERMEDIATE_BUFFERING` is set.
         WRITE_THROUGH: bool = false,
         /// All accesses to the file are sequential.
         SEQUENTIAL_ONLY: bool = false,
-        /// The file cannot be cached or buffered in a driver's internal buffers. This flag is incompatible with the DesiredAccess `FILE_APPEND_DATA` flag.
+        /// The file cannot be cached or buffered in a driver's internal
+        /// buffers. This flag is incompatible with the DesiredAccess
+        /// `FILE_APPEND_DATA` flag.
         NO_INTERMEDIATE_BUFFERING: bool = false,
         IO: enum(u2) {
             /// All operations on the file are performed asynchronously.
             ASYNCHRONOUS = 0b00,
-            /// All operations on the file are performed synchronously. Any wait on behalf of the caller is subject to premature termination from alerts.
-            /// This flag also causes the I/O system to maintain the file position context. If this flag is set, the DesiredAccess `SYNCHRONIZE` flag also must be set.
+            /// All operations on the file are performed synchronously. Any
+            /// wait on behalf of the caller is subject to premature
+            /// termination from alerts. This flag also causes the I/O system
+            /// to maintain the file position context. If this flag is set, the
+            /// DesiredAccess `SYNCHRONIZE` flag also must be set.
             SYNCHRONOUS_ALERT = 0b01,
-            /// All operations on the file are performed synchronously. Waits in the system to synchronize I/O queuing and completion are not subject to alerts.
-            /// This flag also causes the I/O system to maintain the file position context. If this flag is set, the DesiredAccess `SYNCHRONIZE` flag also must be set.
+            /// All operations on the file are performed synchronously. Waits
+            /// in the system to synchronize I/O queuing and completion are not
+            /// subject to alerts. This flag also causes the I/O system to
+            /// maintain the file position context. If this flag is set, the
+            /// DesiredAccess `SYNCHRONIZE` flag also must be set.
             SYNCHRONOUS_NONALERT = 0b10,
             _,
 
             pub const VALID_FLAGS: @This() = @enumFromInt(0b11);
         } = .ASYNCHRONOUS,
-        /// The file being opened must not be a directory file or this call fails. The file object being opened can represent a data file, a logical, virtual, or physical
-        /// device, or a volume.
+        /// The file being opened must not be a directory file or this call
+        /// fails. The file object being opened can represent a data file, a
+        /// logical, virtual, or physical device, or a volume.
         NON_DIRECTORY_FILE: bool = false,
-        /// Create a tree connection for this file in order to open it over the network. This flag is not used by device and intermediate drivers.
+        /// Create a tree connection for this file in order to open it over the
+        /// network. This flag is not used by device and intermediate drivers.
         CREATE_TREE_CONNECTION: bool = false,
-        /// Complete this operation immediately with an alternate success code of `STATUS_OPLOCK_BREAK_IN_PROGRESS` if the target file is oplocked, rather than blocking
-        /// the caller's thread. If the file is oplocked, another caller already has access to the file. This flag is not used by device and intermediate drivers.
+        /// Complete this operation immediately with an alternate success code
+        /// of `STATUS_OPLOCK_BREAK_IN_PROGRESS` if the target file is
+        /// oplocked, rather than blocking the caller's thread. If the file is
+        /// oplocked, another caller already has access to the file. This flag
+        /// is not used by device and intermediate drivers.
         COMPLETE_IF_OPLOCKED: bool = false,
-        /// If the extended attributes on an existing file being opened indicate that the caller must understand EAs to properly interpret the file, fail this request
-        /// because the caller does not understand how to deal with EAs. This flag is irrelevant for device and intermediate drivers.
+        /// If the extended attributes on an existing file being opened
+        /// indicate that the caller must understand EAs to properly interpret
+        /// the file, fail this request because the caller does not understand
+        /// how to deal with EAs. This flag is irrelevant for device and
+        /// intermediate drivers.
         NO_EA_KNOWLEDGE: bool = false,
         OPEN_REMOTE_INSTANCE: bool = false,
-        /// Accesses to the file can be random, so no sequential read-ahead operations should be performed on the file by FSDs or the system.
+        /// Accesses to the file can be random, so no sequential read-ahead
+        /// operations should be performed on the file by FSDs or the system.
         RANDOM_ACCESS: bool = false,
-        /// Delete the file when the last handle to it is passed to `NtClose`. If this flag is set, the `DELETE` flag must be set in the DesiredAccess parameter.
+        /// Delete the file when the last handle to it is passed to `NtClose`.
+        /// If this flag is set, the `DELETE` flag must be set in the
+        /// DesiredAccess parameter.
         DELETE_ON_CLOSE: bool = false,
-        /// The file name that is specified by the `ObjectAttributes` parameter includes the 8-byte file reference number for the file. This number is assigned by and
-        /// specific to the particular file system. If the file is a reparse point, the file name will also include the name of a device. Note that the FAT file system
-        /// does not support this flag. This flag is not used by device and intermediate drivers.
+        /// The file name that is specified by the `ObjectAttributes` parameter
+        /// includes the 8-byte file reference number for the file. This number
+        /// is assigned by and specific to the particular file system. If the
+        /// file is a reparse point, the file name will also include the name
+        /// of a device. Note that the FAT file system does not support this
+        /// flag. This flag is not used by device and intermediate drivers.
         OPEN_BY_FILE_ID: bool = false,
-        /// The file is being opened for backup intent. Therefore, the system should check for certain access rights and grant the caller the appropriate access to the
-        /// file before checking the DesiredAccess parameter against the file's security descriptor. This flag not used by device and intermediate drivers.
+        /// The file is being opened for backup intent. Therefore, the system
+        /// should check for certain access rights and grant the caller the
+        /// appropriate access to the file before checking the DesiredAccess
+        /// parameter against the file's security descriptor. This flag not
+        /// used by device and intermediate drivers.
         OPEN_FOR_BACKUP_INTENT: bool = false,
-        /// Suppress inheritance of `FILE_ATTRIBUTE.COMPRESSED` from the parent directory. This allows creation of a non-compressed file in a directory that is marked
-        /// compressed.
+        /// Suppress inheritance of `FILE_ATTRIBUTE.COMPRESSED` from the parent
+        /// directory. This allows creation of a non-compressed file in a
+        /// directory that is marked compressed.
         NO_COMPRESSION: bool = false,
-        /// The file is being opened and an opportunistic lock on the file is being requested as a single atomic operation. The file system checks for oplocks before it
-        /// performs the create operation and will fail the create with a return code of STATUS_CANNOT_BREAK_OPLOCK if the result would be to break an existing oplock.
-        /// For more information, see the Remarks section.
+        /// The file is being opened and an opportunistic lock on the file is
+        /// being requested as a single atomic operation. The file system
+        /// checks for oplocks before it performs the create operation and will
+        /// fail the create with a return code of STATUS_CANNOT_BREAK_OPLOCK if
+        /// the result would be to break an existing oplock. For more
+        /// information, see the Remarks section.
         ///
-        /// Windows Server 2008, Windows Vista, Windows Server 2003 and Windows XP:  This flag is not supported.
+        /// Windows Server 2008, Windows Vista, Windows Server 2003 and Windows
+        /// XP:  This flag is not supported.
         ///
-        /// This flag is supported on the following file systems: NTFS, FAT, and exFAT.
+        /// This flag is supported on the following file systems: NTFS, FAT,
+        /// and exFAT.
         OPEN_REQUIRING_OPLOCK: bool = false,
         Reserved17: u3 = 0,
-        /// This flag allows an application to request a filter opportunistic lock to prevent other applications from getting share violations. If there are already open
-        /// handles, the create request will fail with STATUS_OPLOCK_NOT_GRANTED. For more information, see the Remarks section.
+        /// This flag allows an application to request a filter opportunistic
+        /// lock to prevent other applications from getting share violations.
+        /// If there are already open handles, the create request will fail
+        /// with STATUS_OPLOCK_NOT_GRANTED. For more information, see the
+        /// Remarks section.
         RESERVE_OPFILTER: bool = false,
-        /// Open a file with a reparse point and bypass normal reparse point processing for the file. For more information, see the Remarks section.
+        /// Open a file with a reparse point and bypass normal reparse point
+        /// processing for the file. For more information, see the Remarks
+        /// section.
         OPEN_REPARSE_POINT: bool = false,
-        /// Instructs any filters that perform offline storage or virtualization to not recall the contents of the file as a result of this open.
+        /// Instructs any filters that perform offline storage or
+        /// virtualization to not recall the contents of the file as a result
+        /// of this open.
         OPEN_NO_RECALL: bool = false,
-        /// This flag instructs the file system to capture the user associated with the calling thread. Any subsequent calls to `FltQueryVolumeInformation` or
-        /// `ZwQueryVolumeInformationFile` using the returned handle will assume the captured user, rather than the calling user at the time, for purposes of computing
-        /// the free space available to the caller. This applies to the following FsInformationClass values: `FileFsSizeInformation`, `FileFsFullSizeInformation`, and
-        /// `FileFsFullSizeInformationEx`.
+        /// This flag instructs the file system to capture the user associated
+        /// with the calling thread. Any subsequent calls to
+        /// `FltQueryVolumeInformation` or `ZwQueryVolumeInformationFile` using
+        /// the returned handle will assume the captured user, rather than the
+        /// calling user at the time, for purposes of computing the free space
+        /// available to the caller. This applies to the following
+        /// FsInformationClass values: `FileFsSizeInformation`,
+        /// `FileFsFullSizeInformation`, and `FileFsFullSizeInformationEx`.
         OPEN_FOR_FREE_SPACE_QUERY: bool = false,
         Reserved24: u8 = 0,
 
@@ -597,7 +648,8 @@ pub const FILE = struct {
         // ref: km/ntifs.h
 
         pub const INFORMATION = extern struct {
-            /// The set of flags that specify the mode in which the file can be accessed. These flags are a subset of `MODE`.
+            /// The set of flags that specify the mode in which the file can be
+            /// accessed. These flags are a subset of `MODE`.
             Mode: MODE,
         };
     };
@@ -1083,19 +1135,7 @@ pub const CTL_CODE = packed struct(ULONG) {
 
         _,
     };
-};
 
-pub const IOCTL = struct {
-    pub const KSEC = struct {
-        pub const GEN_RANDOM: CTL_CODE = .{ .DeviceType = .KSEC, .Function = 2, .Method = .BUFFERED, .Access = .ANY };
-    };
-    pub const MOUNTMGR = struct {
-        pub const QUERY_POINTS: CTL_CODE = .{ .DeviceType = .MOUNTMGRCONTROLTYPE, .Function = 2, .Method = .BUFFERED, .Access = .ANY };
-        pub const QUERY_DOS_VOLUME_PATH: CTL_CODE = .{ .DeviceType = .MOUNTMGRCONTROLTYPE, .Function = 12, .Method = .BUFFERED, .Access = .ANY };
-    };
-};
-
-pub const FSCTL = struct {
     pub const SET_REPARSE_POINT: CTL_CODE = .{ .DeviceType = .FILE_SYSTEM, .Function = 41, .Method = .BUFFERED, .Access = .SPECIAL };
     pub const GET_REPARSE_POINT: CTL_CODE = .{ .DeviceType = .FILE_SYSTEM, .Function = 42, .Method = .BUFFERED, .Access = .ANY };
 
@@ -1122,6 +1162,16 @@ pub const FSCTL = struct {
         pub const INTERNAL_WRITE: CTL_CODE = .{ .DeviceType = .NAMED_PIPE, .Function = 2046, .Method = .BUFFERED, .Access = .{ .WRITE = true } };
         pub const INTERNAL_TRANSCEIVE: CTL_CODE = .{ .DeviceType = .NAMED_PIPE, .Function = 2047, .Method = .NEITHER, .Access = .{ .READ = true, .WRITE = true } };
         pub const INTERNAL_READ_OVFLOW: CTL_CODE = .{ .DeviceType = .NAMED_PIPE, .Function = 2048, .Method = .BUFFERED, .Access = .{ .READ = true } };
+    };
+};
+
+pub const IOCTL = struct {
+    pub const KSEC = struct {
+        pub const GEN_RANDOM: CTL_CODE = .{ .DeviceType = .KSEC, .Function = 2, .Method = .BUFFERED, .Access = .ANY };
+    };
+    pub const MOUNTMGR = struct {
+        pub const QUERY_POINTS: CTL_CODE = .{ .DeviceType = .MOUNTMGRCONTROLTYPE, .Function = 2, .Method = .BUFFERED, .Access = .ANY };
+        pub const QUERY_DOS_VOLUME_PATH: CTL_CODE = .{ .DeviceType = .MOUNTMGRCONTROLTYPE, .Function = 12, .Method = .BUFFERED, .Access = .ANY };
     };
 };
 
@@ -2828,502 +2878,6 @@ pub fn CloseHandle(hObject: HANDLE) void {
     assert(ntdll.NtClose(hObject) == .SUCCESS);
 }
 
-pub const GetCurrentDirectoryError = error{
-    NameTooLong,
-    Unexpected,
-};
-
-/// The result is a slice of `buffer`, indexed from 0.
-/// The result is encoded as [WTF-8](https://wtf-8.codeberg.page/).
-pub fn GetCurrentDirectory(buffer: []u8) GetCurrentDirectoryError![]u8 {
-    var wtf16le_buf: [PATH_MAX_WIDE:0]u16 = undefined;
-    const result = kernel32.GetCurrentDirectoryW(wtf16le_buf.len + 1, &wtf16le_buf);
-    if (result == 0) {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-    assert(result <= wtf16le_buf.len);
-    const wtf16le_slice = wtf16le_buf[0..result];
-    var end_index: usize = 0;
-    var it = std.unicode.Wtf16LeIterator.init(wtf16le_slice);
-    while (it.nextCodepoint()) |codepoint| {
-        const seq_len = std.unicode.utf8CodepointSequenceLength(codepoint) catch unreachable;
-        if (end_index + seq_len >= buffer.len)
-            return error.NameTooLong;
-        end_index += std.unicode.wtf8Encode(codepoint, buffer[end_index..]) catch unreachable;
-    }
-    return buffer[0..end_index];
-}
-
-pub const CreateSymbolicLinkError = error{
-    AccessDenied,
-    PathAlreadyExists,
-    FileNotFound,
-    NameTooLong,
-    NoDevice,
-    NetworkNotFound,
-    BadPathName,
-    Unexpected,
-};
-
-/// Needs either:
-/// - `SeCreateSymbolicLinkPrivilege` privilege
-/// or
-/// - Developer mode on Windows 10
-/// otherwise fails with `error.AccessDenied`. In which case `sym_link_path` may still
-/// be created on the file system but will lack reparse processing data applied to it.
-pub fn CreateSymbolicLink(
-    dir: ?HANDLE,
-    sym_link_path: []const u16,
-    target_path: [:0]const u16,
-    is_directory: bool,
-) CreateSymbolicLinkError!void {
-    const SYMLINK_DATA = extern struct {
-        ReparseTag: IO_REPARSE_TAG,
-        ReparseDataLength: USHORT,
-        Reserved: USHORT,
-        SubstituteNameOffset: USHORT,
-        SubstituteNameLength: USHORT,
-        PrintNameOffset: USHORT,
-        PrintNameLength: USHORT,
-        Flags: ULONG,
-    };
-
-    const symlink_handle = OpenFile(sym_link_path, .{
-        .access_mask = .{
-            .STANDARD = .{ .SYNCHRONIZE = true },
-            .GENERIC = .{ .WRITE = true, .READ = true },
-        },
-        .dir = dir,
-        .creation = .CREATE,
-        .filter = if (is_directory) .dir_only else .non_directory_only,
-    }) catch |err| switch (err) {
-        error.IsDir => return error.PathAlreadyExists,
-        error.NotDir => return error.Unexpected,
-        error.WouldBlock => return error.Unexpected,
-        error.PipeBusy => return error.Unexpected,
-        error.NoDevice => return error.Unexpected,
-        error.AntivirusInterference => return error.Unexpected,
-        else => |e| return e,
-    };
-    defer CloseHandle(symlink_handle);
-
-    // Relevant portions of the documentation:
-    // > Relative links are specified using the following conventions:
-    // > - Root relative—for example, "\Windows\System32" resolves to "current drive:\Windows\System32".
-    // > - Current working directory–relative—for example, if the current working directory is
-    // >   C:\Windows\System32, "C:File.txt" resolves to "C:\Windows\System32\File.txt".
-    // > Note: If you specify a current working directory–relative link, it is created as an absolute
-    // > link, due to the way the current working directory is processed based on the user and the thread.
-    // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createsymboliclinkw
-    var is_target_absolute = false;
-    const final_target_path = target_path: {
-        if (hasCommonNtPrefix(u16, target_path)) {
-            // Already an NT path, no need to do anything to it
-            break :target_path target_path;
-        } else {
-            switch (std.fs.path.getWin32PathType(u16, target_path)) {
-                // Rooted paths need to avoid getting put through wToPrefixedFileW
-                // (and they are treated as relative in this context)
-                // Note: It seems that rooted paths in symbolic links are relative to
-                //       the drive that the symbolic exists on, not to the CWD's drive.
-                //       So, if the symlink is on C:\ and the CWD is on D:\,
-                //       it will still resolve the path relative to the root of
-                //       the C:\ drive.
-                .rooted => break :target_path target_path,
-                // Keep relative paths relative, but anything else needs to get NT-prefixed.
-                else => if (!std.fs.path.isAbsoluteWindowsWtf16(target_path))
-                    break :target_path target_path,
-            }
-        }
-        var prefixed_target_path = try wToPrefixedFileW(dir, target_path);
-        // We do this after prefixing to ensure that drive-relative paths are treated as absolute
-        is_target_absolute = std.fs.path.isAbsoluteWindowsWtf16(prefixed_target_path.span());
-        break :target_path prefixed_target_path.span();
-    };
-
-    // prepare reparse data buffer
-    var buffer: [MAXIMUM_REPARSE_DATA_BUFFER_SIZE]u8 = undefined;
-    const buf_len = @sizeOf(SYMLINK_DATA) + final_target_path.len * 4;
-    const header_len = @sizeOf(ULONG) + @sizeOf(USHORT) * 2;
-    const target_is_absolute = std.fs.path.isAbsoluteWindowsWtf16(final_target_path);
-    const symlink_data: SYMLINK_DATA = .{
-        .ReparseTag = .SYMLINK,
-        .ReparseDataLength = @intCast(buf_len - header_len),
-        .Reserved = 0,
-        .SubstituteNameOffset = @intCast(final_target_path.len * 2),
-        .SubstituteNameLength = @intCast(final_target_path.len * 2),
-        .PrintNameOffset = 0,
-        .PrintNameLength = @intCast(final_target_path.len * 2),
-        .Flags = if (!target_is_absolute) SYMLINK_FLAG_RELATIVE else 0,
-    };
-
-    @memcpy(buffer[0..@sizeOf(SYMLINK_DATA)], std.mem.asBytes(&symlink_data));
-    @memcpy(buffer[@sizeOf(SYMLINK_DATA)..][0 .. final_target_path.len * 2], @as([*]const u8, @ptrCast(final_target_path)));
-    const paths_start = @sizeOf(SYMLINK_DATA) + final_target_path.len * 2;
-    @memcpy(buffer[paths_start..][0 .. final_target_path.len * 2], @as([*]const u8, @ptrCast(final_target_path)));
-    const rc = DeviceIoControl(symlink_handle, FSCTL.SET_REPARSE_POINT, .{ .in = buffer[0..buf_len] });
-    switch (rc) {
-        .SUCCESS => {},
-        .PRIVILEGE_NOT_HELD => return error.AccessDenied,
-        .ACCESS_DENIED => return error.AccessDenied,
-        .INVALID_DEVICE_REQUEST => return error.AccessDenied, // Not supported by the underlying filesystem
-        else => return unexpectedStatus(rc),
-    }
-}
-
-pub const ReadLinkError = error{
-    FileNotFound,
-    NetworkNotFound,
-    AccessDenied,
-    Unexpected,
-    NameTooLong,
-    BadPathName,
-    AntivirusInterference,
-    UnsupportedReparsePointType,
-    NotLink,
-    OperationCanceled,
-};
-
-/// `sub_path_w` will never be accessed after `out_buffer` has been written to, so it
-/// is safe to reuse a single buffer for both.
-pub fn ReadLink(dir: ?HANDLE, sub_path_w: []const u16, out_buffer: []u16) ReadLinkError![]u16 {
-    const result_handle = OpenFile(sub_path_w, .{
-        .access_mask = .{
-            .SPECIFIC = .{ .FILE = .{
-                .READ_ATTRIBUTES = true,
-            } },
-            .STANDARD = .{ .SYNCHRONIZE = true },
-        },
-        .dir = dir,
-        .creation = .OPEN,
-        .follow_symlinks = false,
-        .filter = .any,
-    }) catch |err| switch (err) {
-        error.IsDir, error.NotDir => return error.Unexpected, // filter = .any
-        error.PathAlreadyExists => return error.Unexpected, // FILE_OPEN
-        error.WouldBlock => return error.Unexpected,
-        error.NoDevice => return error.FileNotFound,
-        error.PipeBusy => return error.AccessDenied,
-        else => |e| return e,
-    };
-    defer CloseHandle(result_handle);
-
-    var reparse_buf: [MAXIMUM_REPARSE_DATA_BUFFER_SIZE]u8 align(@alignOf(REPARSE_DATA_BUFFER)) = undefined;
-    const rc = DeviceIoControl(result_handle, FSCTL.GET_REPARSE_POINT, .{ .out = reparse_buf[0..] });
-    switch (rc) {
-        .SUCCESS => {},
-        .CANCELLED => return error.OperationCanceled,
-        .NOT_A_REPARSE_POINT => return error.NotLink,
-        else => return unexpectedStatus(rc),
-    }
-
-    const reparse_struct: *const REPARSE_DATA_BUFFER = @ptrCast(@alignCast(&reparse_buf[0]));
-    const IoReparseTagInt = @typeInfo(IO_REPARSE_TAG).@"struct".backing_integer.?;
-    switch (@as(IoReparseTagInt, @bitCast(reparse_struct.ReparseTag))) {
-        @as(IoReparseTagInt, @bitCast(IO_REPARSE_TAG.SYMLINK)) => {
-            const buf: *const SYMBOLIC_LINK_REPARSE_BUFFER = @ptrCast(@alignCast(&reparse_struct.DataBuffer[0]));
-            const offset = buf.SubstituteNameOffset >> 1;
-            const len = buf.SubstituteNameLength >> 1;
-            const path_buf = @as([*]const u16, &buf.PathBuffer);
-            const is_relative = buf.Flags & SYMLINK_FLAG_RELATIVE != 0;
-            return parseReadLinkPath(path_buf[offset..][0..len], is_relative, out_buffer);
-        },
-        @as(IoReparseTagInt, @bitCast(IO_REPARSE_TAG.MOUNT_POINT)) => {
-            const buf: *const MOUNT_POINT_REPARSE_BUFFER = @ptrCast(@alignCast(&reparse_struct.DataBuffer[0]));
-            const offset = buf.SubstituteNameOffset >> 1;
-            const len = buf.SubstituteNameLength >> 1;
-            const path_buf = @as([*]const u16, &buf.PathBuffer);
-            return parseReadLinkPath(path_buf[offset..][0..len], false, out_buffer);
-        },
-        else => return error.UnsupportedReparsePointType,
-    }
-}
-
-fn parseReadLinkPath(path: []const u16, is_relative: bool, out_buffer: []u16) error{NameTooLong}![]u16 {
-    path: {
-        if (is_relative) break :path;
-        return ntToWin32Namespace(path, out_buffer) catch |err| switch (err) {
-            error.NameTooLong => |e| return e,
-            error.NotNtPath => break :path,
-        };
-    }
-    if (out_buffer.len < path.len) return error.NameTooLong;
-    const dest = out_buffer[0..path.len];
-    @memcpy(dest, path);
-    return dest;
-}
-
-pub const DeleteFileError = error{
-    FileNotFound,
-    AccessDenied,
-    NameTooLong,
-    /// Also known as sharing violation.
-    FileBusy,
-    Unexpected,
-    NotDir,
-    IsDir,
-    DirNotEmpty,
-    NetworkNotFound,
-};
-
-pub const DeleteFileOptions = struct {
-    dir: ?HANDLE,
-    remove_dir: bool = false,
-};
-
-pub fn DeleteFile(sub_path_w: []const u16, options: DeleteFileOptions) DeleteFileError!void {
-    const path_len_bytes = @as(u16, @intCast(sub_path_w.len * 2));
-    var nt_name: UNICODE_STRING = .{
-        .Length = path_len_bytes,
-        .MaximumLength = path_len_bytes,
-        // The Windows API makes this mutable, but it will not mutate here.
-        .Buffer = @constCast(sub_path_w.ptr),
-    };
-
-    if (sub_path_w[0] == '.' and sub_path_w[1] == 0) {
-        // Windows does not recognize this, but it does work with empty string.
-        nt_name.Length = 0;
-    }
-    if (sub_path_w[0] == '.' and sub_path_w[1] == '.' and sub_path_w[2] == 0) {
-        // Can't remove the parent directory with an open handle.
-        return error.FileBusy;
-    }
-
-    var io: IO_STATUS_BLOCK = undefined;
-    var tmp_handle: HANDLE = undefined;
-    var rc = ntdll.NtCreateFile(
-        &tmp_handle,
-        .{ .STANDARD = .{
-            .RIGHTS = .{ .DELETE = true },
-            .SYNCHRONIZE = true,
-        } },
-        &.{
-            .Length = @sizeOf(OBJECT_ATTRIBUTES),
-            .RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(sub_path_w)) null else options.dir,
-            .Attributes = .{},
-            .ObjectName = &nt_name,
-            .SecurityDescriptor = null,
-            .SecurityQualityOfService = null,
-        },
-        &io,
-        null,
-        .{},
-        .VALID_FLAGS,
-        .OPEN,
-        .{
-            .DIRECTORY_FILE = options.remove_dir,
-            .NON_DIRECTORY_FILE = !options.remove_dir,
-            .OPEN_REPARSE_POINT = true, // would we ever want to delete the target instead?
-        },
-        null,
-        0,
-    );
-    switch (rc) {
-        .SUCCESS => {},
-        .OBJECT_NAME_INVALID => unreachable,
-        .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
-        .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
-        .BAD_NETWORK_PATH => return error.NetworkNotFound, // \\server was not found
-        .BAD_NETWORK_NAME => return error.NetworkNotFound, // \\server was found but \\server\share wasn't
-        .INVALID_PARAMETER => unreachable,
-        .FILE_IS_A_DIRECTORY => return error.IsDir,
-        .NOT_A_DIRECTORY => return error.NotDir,
-        .SHARING_VIOLATION => return error.FileBusy,
-        .ACCESS_DENIED => return error.AccessDenied,
-        .DELETE_PENDING => return,
-        else => return unexpectedStatus(rc),
-    }
-    defer CloseHandle(tmp_handle);
-
-    // FileDispositionInformationEx has varying levels of support:
-    // - FILE_DISPOSITION_INFORMATION_EX requires >= win10_rs1
-    //   (INVALID_INFO_CLASS is returned if not supported)
-    // - Requires the NTFS filesystem
-    //   (on filesystems like FAT32, INVALID_PARAMETER is returned)
-    // - FILE_DISPOSITION_POSIX_SEMANTICS requires >= win10_rs1
-    // - FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE requires >= win10_rs5
-    //   (NOT_SUPPORTED is returned if a flag is unsupported)
-    //
-    // The strategy here is just to try using FileDispositionInformationEx and fall back to
-    // FileDispositionInformation if the return value lets us know that some aspect of it is not supported.
-    const need_fallback = need_fallback: {
-        // Deletion with posix semantics if the filesystem supports it.
-        var info: FILE.DISPOSITION.INFORMATION.EX = .{ .Flags = .{
-            .DELETE = true,
-            .POSIX_SEMANTICS = true,
-            .IGNORE_READONLY_ATTRIBUTE = true,
-        } };
-        rc = ntdll.NtSetInformationFile(
-            tmp_handle,
-            &io,
-            &info,
-            @sizeOf(FILE.DISPOSITION.INFORMATION.EX),
-            .DispositionEx,
-        );
-        switch (rc) {
-            .SUCCESS => return,
-            // The filesystem does not support FileDispositionInformationEx
-            .INVALID_PARAMETER,
-            // The operating system does not support FileDispositionInformationEx
-            .INVALID_INFO_CLASS,
-            // The operating system does not support one of the flags
-            .NOT_SUPPORTED,
-            => break :need_fallback true,
-            // For all other statuses, fall down to the switch below to handle them.
-            else => break :need_fallback false,
-        }
-    };
-
-    if (need_fallback) {
-        // Deletion with file pending semantics, which requires waiting or moving
-        // files to get them removed (from here).
-        var file_dispo: FILE.DISPOSITION.INFORMATION = .{
-            .DeleteFile = TRUE,
-        };
-        rc = ntdll.NtSetInformationFile(
-            tmp_handle,
-            &io,
-            &file_dispo,
-            @sizeOf(FILE.DISPOSITION.INFORMATION),
-            .Disposition,
-        );
-    }
-    switch (rc) {
-        .SUCCESS => {},
-        .DIRECTORY_NOT_EMPTY => return error.DirNotEmpty,
-        .INVALID_PARAMETER => unreachable,
-        .CANNOT_DELETE => return error.AccessDenied,
-        .MEDIA_WRITE_PROTECTED => return error.AccessDenied,
-        .ACCESS_DENIED => return error.AccessDenied,
-        else => return unexpectedStatus(rc),
-    }
-}
-
-pub const RenameError = error{
-    IsDir,
-    NotDir,
-    FileNotFound,
-    NoDevice,
-    AccessDenied,
-    PipeBusy,
-    PathAlreadyExists,
-    Unexpected,
-    NameTooLong,
-    NetworkNotFound,
-    AntivirusInterference,
-    BadPathName,
-    CrossDevice,
-} || UnexpectedError;
-
-pub fn RenameFile(
-    /// May only be `null` if `old_path_w` is a fully-qualified absolute path.
-    old_dir_fd: ?HANDLE,
-    old_path_w: []const u16,
-    /// May only be `null` if `new_path_w` is a fully-qualified absolute path,
-    /// or if the file is not being moved to a different directory.
-    new_dir_fd: ?HANDLE,
-    new_path_w: []const u16,
-    replace_if_exists: bool,
-) RenameError!void {
-    const src_fd = OpenFile(old_path_w, .{
-        .dir = old_dir_fd,
-        .access_mask = .{
-            .STANDARD = .{
-                .RIGHTS = .{ .DELETE = true },
-                .SYNCHRONIZE = true,
-            },
-            .GENERIC = .{ .WRITE = true },
-        },
-        .creation = .OPEN,
-        .filter = .any, // This function is supposed to rename both files and directories.
-        .follow_symlinks = false,
-    }) catch |err| switch (err) {
-        error.WouldBlock => unreachable, // Not possible without `.share_access_nonblocking = true`.
-        else => |e| return e,
-    };
-    defer CloseHandle(src_fd);
-
-    var rc: NTSTATUS = undefined;
-    // FileRenameInformationEx has varying levels of support:
-    // - FILE_RENAME_INFORMATION_EX requires >= win10_rs1
-    //   (INVALID_INFO_CLASS is returned if not supported)
-    // - Requires the NTFS filesystem
-    //   (on filesystems like FAT32, INVALID_PARAMETER is returned)
-    // - FILE_RENAME_POSIX_SEMANTICS requires >= win10_rs1
-    // - FILE_RENAME_IGNORE_READONLY_ATTRIBUTE requires >= win10_rs5
-    //   (NOT_SUPPORTED is returned if a flag is unsupported)
-    //
-    // The strategy here is just to try using FileRenameInformationEx and fall back to
-    // FileRenameInformation if the return value lets us know that some aspect of it is not supported.
-    const need_fallback = need_fallback: {
-        var rename_info: FILE.RENAME_INFORMATION = .init(.{
-            .Flags = .{
-                .REPLACE_IF_EXISTS = replace_if_exists,
-                .POSIX_SEMANTICS = true,
-                .IGNORE_READONLY_ATTRIBUTE = true,
-            },
-            .RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(new_path_w)) null else new_dir_fd,
-            .FileName = new_path_w,
-        });
-        var io_status_block: IO_STATUS_BLOCK = undefined;
-        const rename_info_buf = rename_info.toBuffer();
-        rc = ntdll.NtSetInformationFile(
-            src_fd,
-            &io_status_block,
-            rename_info_buf.ptr,
-            @intCast(rename_info_buf.len), // already checked for error.NameTooLong
-            .RenameEx,
-        );
-        switch (rc) {
-            .SUCCESS => return,
-            // The filesystem does not support FileDispositionInformationEx
-            .INVALID_PARAMETER,
-            // The operating system does not support FileDispositionInformationEx
-            .INVALID_INFO_CLASS,
-            // The operating system does not support one of the flags
-            .NOT_SUPPORTED,
-            => break :need_fallback true,
-            // For all other statuses, fall down to the switch below to handle them.
-            else => break :need_fallback false,
-        }
-    };
-
-    if (need_fallback) {
-        var rename_info: FILE.RENAME_INFORMATION = .init(.{
-            .Flags = .{ .REPLACE_IF_EXISTS = replace_if_exists },
-            .RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(new_path_w)) null else new_dir_fd,
-            .FileName = new_path_w,
-        });
-        var io_status_block: IO_STATUS_BLOCK = undefined;
-        const rename_info_buf = rename_info.toBuffer();
-        rc = ntdll.NtSetInformationFile(
-            src_fd,
-            &io_status_block,
-            rename_info_buf.ptr,
-            @intCast(rename_info_buf.len), // already checked for error.NameTooLong
-            .Rename,
-        );
-    }
-
-    switch (rc) {
-        .SUCCESS => {},
-        .INVALID_HANDLE => unreachable,
-        .INVALID_PARAMETER => unreachable,
-        .OBJECT_PATH_SYNTAX_BAD => unreachable,
-        .ACCESS_DENIED => return error.AccessDenied,
-        .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
-        .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
-        .NOT_SAME_DEVICE => return error.CrossDevice,
-        .OBJECT_NAME_COLLISION => return error.PathAlreadyExists,
-        .DIRECTORY_NOT_EMPTY => return error.PathAlreadyExists,
-        .FILE_IS_A_DIRECTORY => return error.IsDir,
-        .NOT_A_DIRECTORY => return error.NotDir,
-        else => return unexpectedStatus(rc),
-    }
-}
-
 pub const GetStdHandleError = error{
     NoStandardHandleAttached,
     Unexpected,
@@ -3657,18 +3211,6 @@ test GetFinalPathNameByHandle {
     _ = try GetFinalPathNameByHandle(handle, .{ .volume_name = .Dos }, buffer[0..required_len_in_u16]);
 }
 
-pub const GetFileSizeError = error{Unexpected};
-
-pub fn GetFileSizeEx(hFile: HANDLE) GetFileSizeError!u64 {
-    var file_size: LARGE_INTEGER = undefined;
-    if (kernel32.GetFileSizeEx(hFile, &file_size) == 0) {
-        switch (GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-    return @as(u64, @bitCast(file_size));
-}
-
 pub fn getpeername(s: ws2_32.SOCKET, name: *ws2_32.sockaddr, namelen: *ws2_32.socklen_t) i32 {
     return ws2_32.getpeername(s, name, @as(*i32, @ptrCast(namelen)));
 }
@@ -3863,69 +3405,6 @@ pub const CreateProcessFlags = packed struct(u32) {
     create_ignore_system_default: bool = false,
 };
 
-pub fn CreateProcessW(
-    lpApplicationName: ?LPCWSTR,
-    lpCommandLine: ?LPWSTR,
-    lpProcessAttributes: ?*SECURITY_ATTRIBUTES,
-    lpThreadAttributes: ?*SECURITY_ATTRIBUTES,
-    bInheritHandles: BOOL,
-    dwCreationFlags: CreateProcessFlags,
-    lpEnvironment: ?[*:0]u16,
-    lpCurrentDirectory: ?LPCWSTR,
-    lpStartupInfo: *STARTUPINFOW,
-    lpProcessInformation: *PROCESS_INFORMATION,
-) CreateProcessError!void {
-    if (kernel32.CreateProcessW(
-        lpApplicationName,
-        lpCommandLine,
-        lpProcessAttributes,
-        lpThreadAttributes,
-        bInheritHandles,
-        dwCreationFlags,
-        lpEnvironment,
-        lpCurrentDirectory,
-        lpStartupInfo,
-        lpProcessInformation,
-    ) == 0) {
-        switch (GetLastError()) {
-            .FILE_NOT_FOUND => return error.FileNotFound,
-            .PATH_NOT_FOUND => return error.FileNotFound,
-            .DIRECTORY => return error.FileNotFound,
-            .ACCESS_DENIED => return error.AccessDenied,
-            .INVALID_PARAMETER => unreachable,
-            .INVALID_NAME => return error.InvalidName,
-            .FILENAME_EXCED_RANGE => return error.NameTooLong,
-            .SHARING_VIOLATION => return error.FileBusy,
-            // These are all the system errors that are mapped to ENOEXEC by
-            // the undocumented _dosmaperr (old CRT) or __acrt_errno_map_os_error
-            // (newer CRT) functions. Their code can be found in crt/src/dosmap.c (old SDK)
-            // or urt/misc/errno.cpp (newer SDK) in the Windows SDK.
-            .BAD_FORMAT,
-            .INVALID_STARTING_CODESEG, // MIN_EXEC_ERROR in errno.cpp
-            .INVALID_STACKSEG,
-            .INVALID_MODULETYPE,
-            .INVALID_EXE_SIGNATURE,
-            .EXE_MARKED_INVALID,
-            .BAD_EXE_FORMAT,
-            .ITERATED_DATA_EXCEEDS_64k,
-            .INVALID_MINALLOCSIZE,
-            .DYNLINK_FROM_INVALID_RING,
-            .IOPL_NOT_ENABLED,
-            .INVALID_SEGDPL,
-            .AUTODATASEG_EXCEEDS_64k,
-            .RING2SEG_MUST_BE_MOVABLE,
-            .RELOC_CHAIN_XEEDS_SEGLIM,
-            .INFLOOP_IN_RELOC_CHAIN, // MAX_EXEC_ERROR in errno.cpp
-            // This one is not mapped to ENOEXEC but it is possible, for example
-            // when calling CreateProcessW on a plain text file with a .exe extension
-            .EXE_MACHINE_TYPE_MISMATCH,
-            => return error.InvalidExe,
-            .COMMITMENT_LIMIT => return error.SystemResources,
-            else => |err| return unexpectedError(err),
-        }
-    }
-}
-
 pub const LoadLibraryError = error{
     FileNotFound,
     Unexpected,
@@ -3990,10 +3469,6 @@ pub fn QueryPerformanceCounter() u64 {
     assert(ntdll.RtlQueryPerformanceCounter(&result) != 0);
     // The kernel treats this integer as unsigned.
     return @as(u64, @bitCast(result));
-}
-
-pub fn InitOnceExecuteOnce(InitOnce: *INIT_ONCE, InitFn: INIT_ONCE_FN, Parameter: ?*anyopaque, Context: ?*anyopaque) void {
-    assert(kernel32.InitOnceExecuteOnce(InitOnce, InitFn, Parameter, Context) != 0);
 }
 
 /// This is a workaround for the C backend until zig has the ability to put
@@ -6221,24 +5696,6 @@ pub const PROCESS_MEMORY_COUNTERS_EX = extern struct {
     PrivateUsage: SIZE_T,
 };
 
-pub const GetProcessMemoryInfoError = error{
-    AccessDenied,
-    InvalidHandle,
-    Unexpected,
-};
-
-pub fn GetProcessMemoryInfo(hProcess: HANDLE) GetProcessMemoryInfoError!VM_COUNTERS {
-    var vmc: VM_COUNTERS = undefined;
-    const rc = ntdll.NtQueryInformationProcess(hProcess, .VmCounters, &vmc, @sizeOf(VM_COUNTERS), null);
-    switch (rc) {
-        .SUCCESS => return vmc,
-        .ACCESS_DENIED => return error.AccessDenied,
-        .INVALID_HANDLE => return error.InvalidHandle,
-        .INVALID_PARAMETER => unreachable,
-        else => return unexpectedStatus(rc),
-    }
-}
-
 pub const PERFORMANCE_INFORMATION = extern struct {
     cb: DWORD,
     CommitTotal: SIZE_T,
@@ -6500,7 +5957,136 @@ pub const PF = enum(DWORD) {
     ARM_V83_JSCVT_INSTRUCTIONS_AVAILABLE = 44,
 
     /// This Arm processor implements the Arm v8.3 LRCPC instructions (for example, LDAPR). Note that certain Arm v8.2 CPUs may optionally support the LRCPC instructions.
-    ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE,
+    ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE = 45,
+
+    /// This Arm processor implements the SVE (Scalable Vector Extension) instructions (FEAT_SVE).
+    ARM_SVE_INSTRUCTIONS_AVAILABLE = 46,
+
+    /// This Arm processor implements the SVE2 instructions (FEAT_SVE2).
+    ARM_SVE2_INSTRUCTIONS_AVAILABLE = 47,
+
+    /// This Arm processor implements the SVE2.1 instructions (FEAT_SVE2p1).
+    ARM_SVE2_1_INSTRUCTIONS_AVAILABLE = 48,
+
+    /// This Arm processor implements the SVE AES instructions (FEAT_SVE_AES).
+    ARM_SVE_AES_INSTRUCTIONS_AVAILABLE = 49,
+
+    /// This Arm processor implements the SVE 128-bit polynomial multiply long instructions (FEAT_SVE_PMULL128).
+    ARM_SVE_PMULL128_INSTRUCTIONS_AVAILABLE = 50,
+
+    /// This Arm processor implements the SVE bit permute instructions (FEAT_SVE_BitPerm).
+    ARM_SVE_BITPERM_INSTRUCTIONS_AVAILABLE = 51,
+
+    /// This Arm processor implements the SVE BF16 (BFloat16) instructions (FEAT_BF16).
+    ARM_SVE_BF16_INSTRUCTIONS_AVAILABLE = 52,
+
+    /// This Arm processor implements the SVE EBF16 (Extended BFloat16) instructions (FEAT_EBF16).
+    ARM_SVE_EBF16_INSTRUCTIONS_AVAILABLE = 53,
+
+    /// This Arm processor implements the SVE B16B16 instructions (FEAT_SVE_B16B16).
+    ARM_SVE_B16B16_INSTRUCTIONS_AVAILABLE = 54,
+
+    /// This Arm processor implements the SVE SHA-3 cryptographic instructions (FEAT_SVE_SHA3).
+    ARM_SVE_SHA3_INSTRUCTIONS_AVAILABLE = 55,
+
+    /// This Arm processor implements the SVE SM4 cryptographic instructions (FEAT_SVE_SM4).
+    ARM_SVE_SM4_INSTRUCTIONS_AVAILABLE = 56,
+
+    /// This Arm processor implements the SVE I8MM (Int8 matrix multiply) instructions (FEAT_I8MM).
+    ARM_SVE_I8MM_INSTRUCTIONS_AVAILABLE = 57,
+
+    /// This Arm processor implements the SVE F32MM (FP32 matrix multiply) instructions (FEAT_F32MM).
+    ARM_SVE_F32MM_INSTRUCTIONS_AVAILABLE = 58,
+
+    /// This Arm processor implements the SVE F64MM (FP64 matrix multiply) instructions (FEAT_F64MM).
+    ARM_SVE_F64MM_INSTRUCTIONS_AVAILABLE = 59,
+
+    /// This x64 processor implements the BMI2 instruction set.
+    BMI2_INSTRUCTIONS_AVAILABLE = 60,
+
+    /// This x64 processor implements the MOVDIR64B instruction.
+    MOVDIR64B_INSTRUCTION_AVAILABLE = 61,
+
+    /// This Arm processor implements the LSE2 atomic instructions (FEAT_LSE2).
+    ARM_LSE2_AVAILABLE = 62,
+
+    /// This Arm processor implements the SHA-3 cryptographic instructions (FEAT_SHA3).
+    ARM_SHA3_INSTRUCTIONS_AVAILABLE = 64,
+
+    /// This Arm processor implements the SHA-512 cryptographic instructions (FEAT_SHA512).
+    ARM_SHA512_INSTRUCTIONS_AVAILABLE = 65,
+
+    /// This Arm processor implements the I8MM (Int8 matrix multiply) NEON instructions (FEAT_I8MM).
+    ARM_V82_I8MM_INSTRUCTIONS_AVAILABLE = 66,
+
+    /// This Arm processor implements the FP16 (half-precision floating point) NEON instructions (FEAT_FP16).
+    ARM_V82_FP16_INSTRUCTIONS_AVAILABLE = 67,
+
+    /// This Arm processor implements the BF16 (BFloat16) NEON instructions (FEAT_BF16).
+    ARM_V86_BF16_INSTRUCTIONS_AVAILABLE = 68,
+
+    /// This Arm processor implements the EBF16 (Extended BFloat16) NEON instructions (FEAT_EBF16).
+    ARM_V86_EBF16_INSTRUCTIONS_AVAILABLE = 69,
+
+    /// This Arm processor implements the SME (Scalable Matrix Extension) instructions (FEAT_SME).
+    ARM_SME_INSTRUCTIONS_AVAILABLE = 70,
+
+    /// This Arm processor implements the SME2 instructions (FEAT_SME2).
+    ARM_SME2_INSTRUCTIONS_AVAILABLE = 71,
+
+    /// This Arm processor implements the SME2.1 instructions (FEAT_SME2p1).
+    ARM_SME2_1_INSTRUCTIONS_AVAILABLE = 72,
+
+    /// This Arm processor implements the SME2.2 instructions (FEAT_SME2p2).
+    ARM_SME2_2_INSTRUCTIONS_AVAILABLE = 73,
+
+    /// This Arm processor implements the SVE AES instructions when in Streaming SVE mode (FEAT_SSVE_AES).
+    ARM_SME_AES_INSTRUCTIONS_AVAILABLE = 74,
+
+    /// This Arm processor implements the SVE bit permute instructions when in Streaming SVE mode (FEAT_SSVE_BitPerm).
+    ARM_SME_SBITPERM_INSTRUCTIONS_AVAILABLE = 75,
+
+    /// This Arm processor implements the SVE FMMLA (widening, 4-way, FP8 to FP16) instruction when in Streaming SVE mode (FEAT_SSVE_F8F16MM).
+    ARM_SME_SF8MM4_INSTRUCTIONS_AVAILABLE = 76,
+
+    /// This Arm processor implements the SVE FMMLA (widening, 8-way, FP8 to FP32) instruction when in Streaming SVE mode (FEAT_SSVE_F8F32MM).
+    ARM_SME_SF8MM8_INSTRUCTIONS_AVAILABLE = 77,
+
+    /// This Arm processor implements the SVE2 FP8DOT2 instructions when in Streaming SVE mode (FEAT_SSVE_FP8DOT2).
+    ARM_SME_SF8DP2_INSTRUCTIONS_AVAILABLE = 78,
+
+    /// This Arm processor implements the SVE2 FP8DOT4 instructions when in Streaming SVE mode (FEAT_SSVE_FP8DOT4).
+    ARM_SME_SF8DP4_INSTRUCTIONS_AVAILABLE = 79,
+
+    /// This Arm processor implements the SVE2 FP8FMA instructions when in Streaming SVE mode (FEAT_SSVE_FP8FMA).
+    ARM_SME_SF8FMA_INSTRUCTIONS_AVAILABLE = 80,
+
+    /// This Arm processor implements the SME F8F32 instructions (FEAT_SME_F8F32).
+    ARM_SME_F8F32_INSTRUCTIONS_AVAILABLE = 81,
+
+    /// This Arm processor implements the SME F8F16 instructions (FEAT_SME_F8F16).
+    ARM_SME_F8F16_INSTRUCTIONS_AVAILABLE = 82,
+
+    /// This Arm processor implements the SME F16F16 instructions (FEAT_SME_F16F16).
+    ARM_SME_F16F16_INSTRUCTIONS_AVAILABLE = 83,
+
+    /// This Arm processor implements the SME B16B16 instructions (FEAT_SME_B16B16).
+    ARM_SME_B16B16_INSTRUCTIONS_AVAILABLE = 84,
+
+    /// This Arm processor implements the SME F64F64 instructions (FEAT_SME_F64F64).
+    ARM_SME_F64F64_INSTRUCTIONS_AVAILABLE = 85,
+
+    /// This Arm processor implements the SME I16I64 instructions (FEAT_SME_I16I64).
+    ARM_SME_I16I64_INSTRUCTIONS_AVAILABLE = 86,
+
+    /// This Arm processor implements the SME LUTv2 instructions (FEAT_SME_LUTv2).
+    ARM_SME_LUTv2_INSTRUCTIONS_AVAILABLE = 87,
+
+    /// This Arm processor implements SME FA64 (Full AArch64 instruction set when in Streaming SVE mode) (FEAT_SME_FA64).
+    ARM_SME_FA64_INSTRUCTIONS_AVAILABLE = 88,
+
+    /// This x64 processor implements the UMONITOR instruction.
+    UMONITOR_INSTRUCTION_AVAILABLE = 89,
 };
 
 pub const MAX_WOW64_SHARED_ENTRIES = 16;
@@ -6772,7 +6358,11 @@ pub fn WriteProcessMemory(handle: HANDLE, addr: ?LPVOID, buffer: []const u8) Wri
     }
 }
 
-pub const ProcessBaseAddressError = GetProcessMemoryInfoError || ReadMemoryError;
+pub const ProcessBaseAddressError = error{
+    AccessDenied,
+    InvalidHandle,
+    Unexpected,
+} || ReadMemoryError;
 
 /// Returns the base address of the process loaded into memory.
 pub fn ProcessBaseAddress(handle: HANDLE) ProcessBaseAddressError!HMODULE {

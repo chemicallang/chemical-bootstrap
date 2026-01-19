@@ -669,14 +669,13 @@ pub fn main(init: std.process.Init) !void {
     const child_args = [_][]const u8{
         llvm_tblgen_exe,
         "--dump-json",
-        try std.fmt.allocPrint(arena, "{s}/clang/include/clang/Driver/Options.td", .{llvm_src_root}),
+        try std.fmt.allocPrint(arena, "{s}/clang/include/clang/Options/Options.td", .{llvm_src_root}),
         try std.fmt.allocPrint(arena, "-I={s}/llvm/include", .{llvm_src_root}),
         try std.fmt.allocPrint(arena, "-I={s}/clang/include/clang/Driver", .{llvm_src_root}),
     };
 
     const child_result = try std.process.run(arena, io, .{
         .argv = &child_args,
-        .max_output_bytes = 100 * 1024 * 1024,
     });
 
     std.debug.print("{s}\n", .{child_result.stderr});

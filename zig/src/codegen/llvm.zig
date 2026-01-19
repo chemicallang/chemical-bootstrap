@@ -165,6 +165,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
             .{ .v9_4a, "v9.4a" },
             .{ .v9_5a, "v9.5a" },
             .{ .v9_6a, "v9.6a" },
+            .{ .v9_7a, "v9.7a" },
         }),
         .powerpc => subArchName(target, .powerpc, .{
             .{ .spe, "spe" },
@@ -256,11 +257,15 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .none,
         .windows,
         => {},
-        .semver => |ver| try llvm_triple.print("{d}.{d}.{d}", .{
-            ver.min.major,
-            ver.min.minor,
-            ver.min.patch,
-        }),
+        .semver => |ver| if (target.os.tag == .wasi and ver.min.major == 0) {
+            try llvm_triple.print("p{d}", .{ver.min.minor});
+        } else {
+            try llvm_triple.print("{d}.{d}.{d}", .{
+                ver.min.major,
+                ver.min.minor,
+                ver.min.patch,
+            });
+        },
         inline .linux, .hurd => |ver| try llvm_triple.print("{d}.{d}.{d}", .{
             ver.range.min.major,
             ver.range.min.minor,
@@ -384,16 +389,9 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
         .powerpc => "E-m:e-p:32:32-Fn32-i64:64-n32",
         .powerpcle => "e-m:e-p:32:32-Fn32-i64:64-n32",
         .powerpc64 => switch (target.os.tag) {
-            .linux => if (target.abi.isMusl())
-                "E-m:e-Fn32-i64:64-i128:128-n32:64-S128-v256:256:256-v512:512:512"
-            else
-                "E-m:e-Fi64-i64:64-i128:128-n32:64-S128-v256:256:256-v512:512:512",
+            .linux => "E-m:e-Fn32-i64:64-i128:128-n32:64-S128-v256:256:256-v512:512:512",
             .ps3 => "E-m:e-p:32:32-Fi64-i64:64-i128:128-n32:64",
-            else => if (target.os.tag == .openbsd or
-                (target.os.tag == .freebsd and target.os.version_range.semver.isAtLeast(.{ .major = 13, .minor = 0, .patch = 0 }) orelse false))
-                "E-m:e-Fn32-i64:64-i128:128-n32:64"
-            else
-                "E-m:e-Fi64-i64:64-i128:128-n32:64",
+            else => "E-m:e-Fn32-i64:64-i128:128-n32:64",
         },
         .powerpc64le => if (target.os.tag == .linux)
             "e-m:e-Fn32-i64:64-i128:128-n32:64-S128-v256:256:256-v512:512:512"
@@ -401,7 +399,7 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
             "e-m:e-Fn32-i64:64-i128:128-n32:64",
         .nvptx => "e-p:32:32-p6:32:32-p7:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64",
         .nvptx64 => "e-p6:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64",
-        .amdgcn => "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9",
+        .amdgcn => "e-m:e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9",
         .riscv32 => if (target.cpu.has(.riscv, .e))
             "e-m:e-p:32:32-i64:64-n32-S32"
         else
@@ -1650,6 +1648,7 @@ pub const Object = struct {
                 if (name.eqlSlice("WinMainCRTStartup", ip)) flags.winmain_crt_startup = true;
                 if (name.eqlSlice("wWinMainCRTStartup", ip)) flags.wwinmain_crt_startup = true;
                 if (name.eqlSlice("DllMainCRTStartup", ip)) flags.dllmain_crt_startup = true;
+                if (name.eqlSlice("_DllMainCRTStartup", ip)) flags.dllmain_crt_startup = true;
             }
         }
 
@@ -12071,11 +12070,11 @@ fn returnTypeByRef(zcu: *Zcu, target: *const std.Target, ty: Type) bool {
     if (isByRef(ty, zcu)) {
         return true;
     } else if (target.cpu.arch.isX86() and
-        !target.cpu.has(.x86, .evex512) and
+        !target.cpu.has(.x86, .avx512f) and
         ty.totalVectorBits(zcu) >= 512)
     {
         // As of LLVM 18, passing a vector byval with fastcc that is 512 bits or more returns
-        // "512-bit vector arguments require 'evex512' for AVX512"
+        // "512-bit vector arguments require 'avx512f' for AVX512"
         return true;
     } else {
         return false;
@@ -12341,11 +12340,11 @@ const ParamTypeIterator = struct {
                 } else if (isByRef(ty, zcu)) {
                     return .byref;
                 } else if (target.cpu.arch.isX86() and
-                    !target.cpu.has(.x86, .evex512) and
+                    !target.cpu.has(.x86, .avx512f) and
                     ty.totalVectorBits(zcu) >= 512)
                 {
                     // As of LLVM 18, passing a vector byval with fastcc that is 512 bits or more returns
-                    // "512-bit vector arguments require 'evex512' for AVX512"
+                    // "512-bit vector arguments require 'avx512f' for AVX512"
                     return .byref;
                 } else {
                     return .byval;
@@ -12608,8 +12607,7 @@ fn ccAbiPromoteInt(cc: std.builtin.CallingConvention, zcu: *Zcu, ty: Type) ?std.
     }
     const int_info = switch (ty.zigTypeTag(zcu)) {
         .bool => Type.u1.intInfo(zcu),
-        .int, .@"enum", .error_set => ty.intInfo(zcu),
-        else => return null,
+        else => if (ty.isAbiInt(zcu)) ty.intInfo(zcu) else return null,
     };
     return switch (target.os.tag) {
         .driverkit, .ios, .maccatalyst, .macos, .watchos, .tvos, .visionos => switch (int_info.bits) {
@@ -12768,20 +12766,6 @@ fn backendSupportsF80(target: *const std.Target) bool {
 /// or if it produces miscompilations.
 fn backendSupportsF16(target: *const std.Target) bool {
     return switch (target.cpu.arch) {
-        // https://github.com/llvm/llvm-project/issues/97981
-        .csky,
-        // https://github.com/llvm/llvm-project/issues/97981
-        .powerpc,
-        .powerpcle,
-        .powerpc64,
-        .powerpc64le,
-        // https://github.com/llvm/llvm-project/issues/97981
-        .wasm32,
-        .wasm64,
-        // https://github.com/llvm/llvm-project/issues/97981
-        .sparc,
-        .sparc64,
-        => false,
         .arm,
         .armeb,
         .thumb,
@@ -12798,11 +12782,6 @@ fn backendSupportsF128(target: *const std.Target) bool {
     return switch (target.cpu.arch) {
         // https://github.com/llvm/llvm-project/issues/121122
         .amdgcn,
-        // Test failures all over the place.
-        .mips64,
-        .mips64el,
-        // https://github.com/llvm/llvm-project/issues/41838
-        .sparc,
         => false,
         .arm,
         .armeb,
@@ -13034,7 +13013,7 @@ pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
                 llvm.LLVMInitializeXtensaTarget();
                 llvm.LLVMInitializeXtensaTargetInfo();
                 llvm.LLVMInitializeXtensaTargetMC();
-                // There is no LLVMInitializeXtensaAsmPrinter function.
+                llvm.LLVMInitializeXtensaAsmPrinter();
                 llvm.LLVMInitializeXtensaAsmParser();
             }
         },

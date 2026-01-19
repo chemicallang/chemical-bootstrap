@@ -10,14 +10,30 @@ const assert = std.debug.assert;
 const Dir = std.Io.Dir;
 
 handle: Handle,
+flags: Flags,
+
+pub const Flags = struct {
+    /// * true:
+    ///   - windows: opened with MODE.IO.ASYNCHRONOUS
+    ///   - POSIX: O_NONBLOCK is set
+    /// * false:
+    ///   - windows: opened with SYNCHRONOUS_ALERT or SYNCHRONOUS_NONALERT, or
+    ///     not a file.
+    ///   - POSIX: O_NONBLOCK is unset
+    nonblocking: bool,
+};
+
+pub const Handle = std.posix.fd_t;
 
 pub const Reader = @import("File/Reader.zig");
 pub const Writer = @import("File/Writer.zig");
 pub const Atomic = @import("File/Atomic.zig");
 /// Memory intended to remain consistent with file contents.
 pub const MemoryMap = @import("File/MemoryMap.zig");
+/// Concurrently read from multiple file streams, eliminating risk of
+/// deadlocking.
+pub const MultiReader = @import("File/MultiReader.zig");
 
-pub const Handle = std.posix.fd_t;
 pub const INode = std.posix.ino_t;
 pub const NLink = std.posix.nlink_t;
 pub const Uid = std.posix.uid_t;
@@ -73,15 +89,42 @@ pub const Stat = struct {
 };
 
 pub fn stdout() File {
-    return .{ .handle = if (is_windows) std.os.windows.peb().ProcessParameters.hStdOutput else std.posix.STDOUT_FILENO };
+    return switch (native_os) {
+        .windows => .{
+            .handle = std.os.windows.peb().ProcessParameters.hStdOutput,
+            .flags = .{ .nonblocking = false },
+        },
+        else => .{
+            .handle = std.posix.STDOUT_FILENO,
+            .flags = .{ .nonblocking = false },
+        },
+    };
 }
 
 pub fn stderr() File {
-    return .{ .handle = if (is_windows) std.os.windows.peb().ProcessParameters.hStdError else std.posix.STDERR_FILENO };
+    return switch (native_os) {
+        .windows => .{
+            .handle = std.os.windows.peb().ProcessParameters.hStdError,
+            .flags = .{ .nonblocking = false },
+        },
+        else => .{
+            .handle = std.posix.STDERR_FILENO,
+            .flags = .{ .nonblocking = false },
+        },
+    };
 }
 
 pub fn stdin() File {
-    return .{ .handle = if (is_windows) std.os.windows.peb().ProcessParameters.hStdInput else std.posix.STDIN_FILENO };
+    return switch (native_os) {
+        .windows => .{
+            .handle = std.os.windows.peb().ProcessParameters.hStdInput,
+            .flags = .{ .nonblocking = false },
+        },
+        else => .{
+            .handle = std.posix.STDIN_FILENO,
+            .flags = .{ .nonblocking = false },
+        },
+    };
 }
 
 pub const StatError = error{
@@ -227,7 +270,6 @@ pub const CreateFlags = struct {
 };
 
 pub const OpenError = error{
-    SharingViolation,
     PipeBusy,
     NoDevice,
     /// On Windows, `\\server` or `\\server\share` was not found.
@@ -528,12 +570,18 @@ pub fn setTimestampsNow(file: File, io: Io) SetTimestampsError!void {
     });
 }
 
+pub const ReadStreamingError = error{EndOfStream} || Reader.Error;
+
 /// Returns 0 on stream end or if `buffer` has no space available for data.
 ///
 /// See also:
 /// * `reader`
-pub fn readStreaming(file: File, io: Io, buffer: []const []u8) Reader.Error!usize {
-    return io.vtable.fileReadStreaming(io.userdata, file, buffer);
+pub fn readStreaming(file: File, io: Io, buffer: []const []u8) ReadStreamingError!usize {
+    const result = try io.operate(.{ .file_read_streaming = .{
+        .file = file,
+        .data = buffer,
+    } });
+    return result.file_read_streaming;
 }
 
 pub const ReadPositionalError = error{
@@ -541,7 +589,6 @@ pub const ReadPositionalError = error{
     SystemResources,
     /// Trying to read a directory file descriptor as if it were a file.
     IsDir,
-    BrokenPipe,
     /// Non-blocking has been enabled, and reading from the file descriptor
     /// would block.
     WouldBlock,
@@ -735,7 +782,7 @@ pub const RealPathError = error{
     NoSpaceLeft,
     FileSystem,
     DeviceBusy,
-    SharingViolation,
+    FileBusy,
     PipeBusy,
     /// On Windows, `\\server` or `\\server\share` was not found.
     NetworkNotFound,

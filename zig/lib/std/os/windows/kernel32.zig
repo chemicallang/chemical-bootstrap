@@ -117,12 +117,6 @@ pub extern "kernel32" fn WriteFile(
     in_out_lpOverlapped: ?*OVERLAPPED,
 ) callconv(.winapi) BOOL;
 
-// TODO: wrapper for NtQueryInformationFile + `FILE_STANDARD_INFORMATION`
-pub extern "kernel32" fn GetFileSizeEx(
-    hFile: HANDLE,
-    lpFileSize: *LARGE_INTEGER,
-) callconv(.winapi) BOOL;
-
 // TODO: Wrapper around GetStdHandle + NtFlushBuffersFile.
 pub extern "kernel32" fn FlushFileBuffers(
     hFile: HANDLE,
@@ -133,12 +127,6 @@ pub extern "kernel32" fn SetFileCompletionNotificationModes(
     FileHandle: HANDLE,
     Flags: UCHAR,
 ) callconv(.winapi) BOOL;
-
-// TODO: `RtlGetCurrentDirectory_U(nBufferLength * 2, lpBuffer)`
-pub extern "kernel32" fn GetCurrentDirectoryW(
-    nBufferLength: DWORD,
-    lpBuffer: ?[*]WCHAR,
-) callconv(.winapi) DWORD;
 
 pub extern "kernel32" fn ReadFile(
     hFile: HANDLE,
@@ -200,9 +188,6 @@ pub extern "kernel32" fn PostQueuedCompletionStatus(
     lpOverlapped: ?*OVERLAPPED,
 ) callconv(.winapi) BOOL;
 
-// TODO:
-// GetOverlappedResultEx with bAlertable=false, which calls: GetStdHandle + WaitForSingleObjectEx.
-// Uses the SwitchBack system to run implementations for older programs; Do we care about this?
 pub extern "kernel32" fn GetOverlappedResult(
     hFile: HANDLE,
     lpOverlapped: *OVERLAPPED,
@@ -283,12 +268,6 @@ pub extern "kernel32" fn GetExitCodeProcess(
     lpExitCode: *DWORD,
 ) callconv(.winapi) BOOL;
 
-// TODO: Wrapper around RtlSetEnvironmentVar.
-pub extern "kernel32" fn SetEnvironmentVariableW(
-    lpName: LPCWSTR,
-    lpValue: ?LPCWSTR,
-) callconv(.winapi) BOOL;
-
 pub extern "kernel32" fn CreateToolhelp32Snapshot(
     dwFlags: DWORD,
     th32ProcessID: DWORD,
@@ -310,13 +289,6 @@ pub extern "kernel32" fn CreateThread(
 ) callconv(.winapi) ?HANDLE;
 
 // Locks, critical sections, initializers
-
-pub extern "kernel32" fn InitOnceExecuteOnce(
-    InitOnce: *INIT_ONCE,
-    InitFn: INIT_ONCE_FN,
-    Parameter: ?*anyopaque,
-    Context: ?*anyopaque,
-) callconv(.winapi) BOOL;
 
 // TODO:
 //  - dwMilliseconds -> LARGE_INTEGER.

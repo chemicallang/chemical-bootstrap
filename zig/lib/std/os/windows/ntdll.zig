@@ -496,6 +496,11 @@ pub extern "ntdll" fn RtlGetFullPathName_U(
     ShortName: ?*[*:0]const u16,
 ) callconv(.winapi) ULONG;
 
+pub extern "ntdll" fn RtlGetCurrentDirectory_U(
+    BufferByteLength: ULONG,
+    Buffer: [*]u16,
+) callconv(.winapi) ULONG;
+
 pub extern "ntdll" fn RtlGetSystemTimePrecise() callconv(.winapi) LARGE_INTEGER;
 
 pub extern "ntdll" fn RtlInitializeCriticalSection(
@@ -567,9 +572,8 @@ pub extern "ntdll" fn NtWaitForAlertByThreadId(
     Address: ?*const anyopaque,
     Timeout: ?*const LARGE_INTEGER,
 ) callconv(.winapi) NTSTATUS;
-pub extern "ntdll" fn NtAlertThreadByThreadId(
-    ThreadId: DWORD,
-) callconv(.winapi) NTSTATUS;
+pub extern "ntdll" fn NtAlertThreadByThreadId(ThreadId: DWORD) callconv(.winapi) NTSTATUS;
+pub extern "ntdll" fn NtAlertThread(ThreadHandle: HANDLE) callconv(.winapi) NTSTATUS;
 pub extern "ntdll" fn NtAlertMultipleThreadByThreadId(
     ThreadIds: [*]const ULONG_PTR,
     ThreadCount: ULONG,
@@ -587,5 +591,28 @@ pub extern "ntdll" fn NtOpenThread(
 pub extern "ntdll" fn NtCancelSynchronousIoFile(
     ThreadHandle: HANDLE,
     RequestToCancel: ?*IO_STATUS_BLOCK,
+    IoStatusBlock: *IO_STATUS_BLOCK,
+) callconv(.winapi) NTSTATUS;
+
+/// This function has been observed to return SUCCESS on timeout on Windows 10
+/// and TIMEOUT on Wine 10.0.
+///
+/// This function has been observed on Windows 11 such that positive interval
+/// is real time, which can cause waits to be interrupted by changing system
+/// time, however negative intervals are not affected by changes to system
+/// time.
+pub extern "ntdll" fn NtDelayExecution(
+    Alertable: BOOLEAN,
+    DelayInterval: *const LARGE_INTEGER,
+) callconv(.winapi) NTSTATUS;
+
+pub extern "ntdll" fn NtCancelIoFileEx(
+    FileHandle: HANDLE,
+    IoRequestToCancel: *const IO_STATUS_BLOCK,
+    IoStatusBlock: *IO_STATUS_BLOCK,
+) callconv(.winapi) NTSTATUS;
+
+pub extern "ntdll" fn NtCancelIoFile(
+    FileHandle: HANDLE,
     IoStatusBlock: *IO_STATUS_BLOCK,
 ) callconv(.winapi) NTSTATUS;

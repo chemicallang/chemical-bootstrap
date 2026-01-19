@@ -80,6 +80,7 @@ sysroot: ?[]const u8,
 root_name: [:0]const u8,
 compiler_rt_strat: RtStrat,
 ubsan_rt_strat: RtStrat,
+zigc_strat: RtStrat,
 /// Resolved into known paths, any GNU ld scripts already resolved.
 link_inputs: []const link.Input,
 /// Needed only for passing -F args to clang.
@@ -767,7 +768,7 @@ pub const Directories = struct {
     ) Directories {
         const wasi = builtin.target.os.tag == .wasi;
 
-        const cwd = introspect.getResolvedCwd(arena) catch |err| {
+        const cwd = introspect.getResolvedCwd(io, arena) catch |err| {
             fatal("unable to get cwd: {t}", .{err});
         };
 
@@ -1851,7 +1852,6 @@ fn addModuleTableToCacheHash(
 ) error{
     OutOfMemory,
     Unexpected,
-    CurrentWorkingDirectoryUnlinked,
 }!void {
     assert(zcu.module_roots.count() != 0); // module_roots is populated
 
@@ -1919,7 +1919,6 @@ pub const CreateError = error{
     OutOfMemory,
     Canceled,
     Unexpected,
-    CurrentWorkingDirectoryUnlinked,
     /// An error has been stored to `diag`.
     CreateFail,
 };
@@ -2101,6 +2100,47 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                 error.StackProtectorUnavailableWithoutLibC => unreachable,
             };
             try options.root_mod.deps.putNoClobber(arena, "ubsan_rt", ubsan_rt_mod);
+        }
+
+        // Like with ubsan_rt we want to go through the `_ = @import("zigc")`
+        // approach if possible since it uses even more of the standard library
+        // and can thus reduce further unnecesary bloat.
+        const zigc_strat: RtStrat = s: {
+            if (options.skip_linker_dependencies) break :s .none;
+            if (target.ofmt == .c) break :s .none;
+            if (!link_libc or !is_exe_or_dyn_lib) break :s .none;
+            if (!target_util.wantsZigC(target, options.config.link_mode)) break :s .none;
+            if (have_zcu) break :s .zcu;
+            break :s .lib;
+        };
+
+        if (zigc_strat == .zcu) {
+            const zigc_mod = Package.Module.create(arena, .{
+                .paths = .{
+                    .root = .zig_lib_root,
+                    .root_src_path = "c.zig",
+                },
+                .fully_qualified_name = "zigc",
+                .cc_argv = &.{},
+                .inherited = .{},
+                .global = options.config,
+                .parent = options.root_mod,
+            }) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                // None of these are possible because the configuration matches the root module
+                // which already passed these checks.
+                error.ValgrindUnsupportedOnTarget => unreachable,
+                error.TargetRequiresSingleThreaded => unreachable,
+                error.BackendRequiresSingleThreaded => unreachable,
+                error.TargetRequiresPic => unreachable,
+                error.PieRequiresPic => unreachable,
+                error.DynamicLinkingRequiresPic => unreachable,
+                error.TargetHasNoRedZone => unreachable,
+                error.StackCheckUnsupportedByTarget => unreachable,
+                error.StackProtectorUnsupportedByTarget => unreachable,
+                error.StackProtectorUnavailableWithoutLibC => unreachable,
+            };
+            try options.root_mod.deps.putNoClobber(arena, "zigc", zigc_mod);
         }
 
         if (options.verbose_llvm_cpu_features) {
@@ -2298,6 +2338,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
             .libc_installation = libc_dirs.libc_installation,
             .compiler_rt_strat = compiler_rt_strat,
             .ubsan_rt_strat = ubsan_rt_strat,
+            .zigc_strat = zigc_strat,
             .link_inputs = options.link_inputs,
             .framework_dirs = options.framework_dirs,
             .llvm_opt_bisect_limit = options.llvm_opt_bisect_limit,
@@ -2653,13 +2694,6 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                 } else {
                     return diag.fail(.cross_libc_unavailable);
                 }
-
-                if ((target.isMuslLibC() and comp.config.link_mode == .static) or
-                    target.isWasiLibC() or
-                    target.isMinGW())
-                {
-                    comp.queued_jobs.zigc_lib = true;
-                }
             }
 
             // Generate Windows import libs.
@@ -2711,6 +2745,15 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                     comp.queued_jobs.ubsan_rt_obj = true;
                 },
                 .dyn_lib => unreachable, // hack for compiler_rt only
+            }
+
+            switch (comp.zigc_strat) {
+                .none, .zcu => {},
+                .lib => {
+                    log.debug("queuing a job to build libzigc", .{});
+                    comp.queued_jobs.zigc_lib = true;
+                },
+                .obj, .dyn_lib => unreachable, // only available as a static library or inside an existing ZCU
             }
 
             if (is_exe_or_dyn_lib and comp.config.any_fuzz) {
@@ -2906,7 +2949,6 @@ pub const UpdateError = error{
     OutOfMemory,
     Canceled,
     Unexpected,
-    CurrentWorkingDirectoryUnlinked,
 };
 
 /// Detect changes to source files, perform semantic analysis, and update the output files.
@@ -3101,6 +3143,11 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
 
         if (zcu.root_mod.deps.get("ubsan_rt")) |ubsan_rt_mod| {
             zcu.analysis_roots_buffer[zcu.analysis_roots_len] = ubsan_rt_mod;
+            zcu.analysis_roots_len += 1;
+        }
+
+        if (zcu.root_mod.deps.get("zigc")) |zigc_mod| {
+            zcu.analysis_roots_buffer[zcu.analysis_roots_len] = zigc_mod;
             zcu.analysis_roots_len += 1;
         }
     }
@@ -3534,6 +3581,7 @@ fn addNonIncrementalStuffToCacheManifest(
     man.hash.add(comp.skip_linker_dependencies);
     man.hash.add(comp.compiler_rt_strat);
     man.hash.add(comp.ubsan_rt_strat);
+    man.hash.add(comp.zigc_strat);
     man.hash.add(comp.rc_includes);
     man.hash.addListOfBytes(comp.force_undefined_symbols.keys());
     man.hash.addListOfBytes(comp.framework_dirs);
@@ -6825,6 +6873,7 @@ fn spawnZigRc(
     child_progress_node: std.Progress.Node,
 ) !void {
     const io = comp.io;
+    const gpa = comp.gpa;
     var node_name: std.ArrayList(u8) = .empty;
     defer node_name.deinit(arena);
 
@@ -6839,55 +6888,69 @@ fn spawnZigRc(
     });
     defer child.kill(io);
 
-    var poller = std.Io.poll(comp.gpa, enum { stdout, stderr }, .{
-        .stdout = child.stdout.?,
-        .stderr = child.stderr.?,
-    });
-    defer poller.deinit();
+    var multi_reader_buffer: Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: Io.File.MultiReader = undefined;
+    multi_reader.init(gpa, io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
 
-    const stdout = poller.reader(.stdout);
+    const stdout = multi_reader.fileReader(0);
+    const MessageHeader = std.zig.Server.Message.Header;
 
-    poll: while (true) {
-        const MessageHeader = std.zig.Server.Message.Header;
-        while (stdout.buffered().len < @sizeOf(MessageHeader)) if (!try poller.poll()) break :poll;
-        const header = stdout.takeStruct(MessageHeader, .little) catch unreachable;
-        while (stdout.buffered().len < header.bytes_len) if (!try poller.poll()) break :poll;
-        const body = stdout.take(header.bytes_len) catch unreachable;
+    var eos_err: error{EndOfStream}!void = {};
 
+    while (true) {
+        const header = stdout.interface.takeStruct(MessageHeader, .little) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadFailed => return stdout.err.?,
+        };
+        const body = stdout.interface.take(header.bytes_len) catch |err| switch (err) {
+            error.EndOfStream => |e| {
+                // Better to report the crash with stderr below, but we set
+                // this in case the child exits successfully while violating
+                // this protocol.
+                eos_err = e;
+                break;
+            },
+            error.ReadFailed => return stdout.err.?,
+        };
         switch (header.tag) {
             // We expect exactly one ErrorBundle, and if any error_bundle header is
             // sent then it's a fatal error.
             .error_bundle => {
-                const error_bundle = try std.zig.Server.allocErrorBundle(comp.gpa, body);
+                const error_bundle = try std.zig.Server.allocErrorBundle(gpa, body);
                 return comp.failWin32ResourceWithOwnedBundle(win32_resource, error_bundle);
             },
             else => {}, // ignore other messages
         }
     }
 
-    // Just in case there's a failure that didn't send an ErrorBundle (e.g. an error return trace)
-    const stderr = poller.reader(.stderr);
+    try multi_reader.fillRemaining(.none);
 
+    // Just in case there's a failure that didn't send an ErrorBundle (e.g. an error return trace)
     const term = child.wait(io) catch |err| {
         return comp.failWin32Resource(win32_resource, "unable to wait for {s} rc: {t}", .{ argv[0], err });
     };
 
+    const stderr = multi_reader.reader(1).buffered();
+
     switch (term) {
         .exited => |code| {
             if (code != 0) {
-                log.err("zig rc failed with stderr:\n{s}", .{stderr.buffered()});
+                log.err("zig rc failed with stderr:\n{s}", .{stderr});
                 return comp.failWin32Resource(win32_resource, "zig rc exited with code {d}", .{code});
             }
         },
         .signal => |sig| {
-            log.err("zig rc signaled {t} with stderr:\n{s}", .{ sig, stderr.buffered() });
+            log.err("zig rc signaled {t} with stderr:\n{s}", .{ sig, stderr });
             return comp.failWin32Resource(win32_resource, "zig rc terminated unexpectedly", .{});
         },
         else => {
-            log.err("zig rc terminated with stderr:\n{s}", .{stderr.buffered()});
+            log.err("zig rc terminated with stderr:\n{s}", .{stderr});
             return comp.failWin32Resource(win32_resource, "zig rc terminated unexpectedly", .{});
         },
     }
+
+    try eos_err;
 }
 
 pub fn tmpFilePath(comp: Compilation, ally: Allocator, suffix: []const u8) error{OutOfMemory}![]const u8 {
@@ -7470,6 +7533,8 @@ pub fn addCCArgs(
                     // We communicate these to Clang through the dedicated options.
                     if (std.mem.startsWith(u8, llvm_name, "soft-float") or
                         std.mem.startsWith(u8, llvm_name, "hard-float") or
+                        (target.cpu.arch.isPowerPC() and std.mem.startsWith(u8, llvm_name, "64bit")) or
+                        (target.cpu.arch.isX86() and std.mem.startsWith(u8, llvm_name, "x32")) or
                         (target.cpu.arch == .s390x and std.mem.eql(u8, llvm_name, "backchain")))
                         continue;
 

@@ -1,13 +1,30 @@
+const SharedObject = @This();
+
+const std = @import("std");
+const Io = std.Io;
+const assert = std.debug.assert;
+const elf = std.elf;
+const log = std.log.scoped(.elf);
+const mem = std.mem;
+const Path = std.Build.Cache.Path;
+const Stat = std.Build.Cache.File.Stat;
+const Allocator = mem.Allocator;
+
+const Elf = @import("../Elf.zig");
+const File = @import("file.zig").File;
+const Symbol = @import("Symbol.zig");
+const Diags = @import("../../link.zig").Diags;
+
 path: Path,
 index: File.Index,
 
 parsed: Parsed,
 
-symbols: std.ArrayListUnmanaged(Symbol),
-symbols_extra: std.ArrayListUnmanaged(u32),
-symbols_resolver: std.ArrayListUnmanaged(Elf.SymbolResolver.Index),
+symbols: std.ArrayList(Symbol),
+symbols_extra: std.ArrayList(u32),
+symbols_resolver: std.ArrayList(Elf.SymbolResolver.Index),
 
-aliases: ?std.ArrayListUnmanaged(u32),
+aliases: ?std.ArrayList(u32),
 
 needed: bool,
 alive: bool,
@@ -35,7 +52,7 @@ pub const Header = struct {
     verdef_sect_index: ?u32,
 
     stat: Stat,
-    strtab: std.ArrayListUnmanaged(u8),
+    strtab: std.ArrayList(u8),
 
     pub fn deinit(header: *Header, gpa: Allocator) void {
         gpa.free(header.sections);
@@ -92,16 +109,17 @@ pub const Parsed = struct {
 
 pub fn parseHeader(
     gpa: Allocator,
+    io: Io,
     diags: *Diags,
     file_path: Path,
-    fs_file: std.fs.File,
+    file: Io.File,
     stat: Stat,
     target: *const std.Target,
 ) !Header {
     var ehdr: elf.Elf64_Ehdr = undefined;
     {
         const buf = mem.asBytes(&ehdr);
-        const amt = try fs_file.preadAll(buf, 0);
+        const amt = try file.readPositionalAll(io, buf, 0);
         if (amt != buf.len) return error.UnexpectedEndOfFile;
     }
     if (!mem.eql(u8, ehdr.e_ident[0..4], "\x7fELF")) return error.BadMagic;
@@ -118,7 +136,7 @@ pub fn parseHeader(
     errdefer gpa.free(sections);
     {
         const buf = mem.sliceAsBytes(sections);
-        const amt = try fs_file.preadAll(buf, shoff);
+        const amt = try file.readPositionalAll(io, buf, shoff);
         if (amt != buf.len) return error.UnexpectedEndOfFile;
     }
 
@@ -143,13 +161,13 @@ pub fn parseHeader(
         const dynamic_table = try gpa.alloc(elf.Elf64_Dyn, n);
         errdefer gpa.free(dynamic_table);
         const buf = mem.sliceAsBytes(dynamic_table);
-        const amt = try fs_file.preadAll(buf, shdr.sh_offset);
+        const amt = try file.readPositionalAll(io, buf, shdr.sh_offset);
         if (amt != buf.len) return error.UnexpectedEndOfFile;
         break :dt dynamic_table;
     } else &.{};
     errdefer gpa.free(dynamic_table);
 
-    var strtab: std.ArrayListUnmanaged(u8) = .empty;
+    var strtab: std.ArrayList(u8) = .empty;
     errdefer strtab.deinit(gpa);
 
     if (dynsym_sect_index) |index| {
@@ -158,7 +176,7 @@ pub fn parseHeader(
         const strtab_shdr = sections[dynsym_shdr.sh_link];
         const n = std.math.cast(usize, strtab_shdr.sh_size) orelse return error.Overflow;
         const buf = try strtab.addManyAsSlice(gpa, n);
-        const amt = try fs_file.preadAll(buf, strtab_shdr.sh_offset);
+        const amt = try file.readPositionalAll(io, buf, strtab_shdr.sh_offset);
         if (amt != buf.len) return error.UnexpectedEndOfFile;
     }
 
@@ -190,9 +208,10 @@ pub fn parseHeader(
 
 pub fn parse(
     gpa: Allocator,
+    io: Io,
     /// Moves resources from header. Caller may unconditionally deinit.
     header: *Header,
-    fs_file: std.fs.File,
+    file: Io.File,
 ) !Parsed {
     const symtab = if (header.dynsym_sect_index) |index| st: {
         const shdr = header.sections[index];
@@ -200,18 +219,18 @@ pub fn parse(
         const symtab = try gpa.alloc(elf.Elf64_Sym, n);
         errdefer gpa.free(symtab);
         const buf = mem.sliceAsBytes(symtab);
-        const amt = try fs_file.preadAll(buf, shdr.sh_offset);
+        const amt = try file.readPositionalAll(io, buf, shdr.sh_offset);
         if (amt != buf.len) return error.UnexpectedEndOfFile;
         break :st symtab;
     } else &.{};
     defer gpa.free(symtab);
 
-    var verstrings: std.ArrayListUnmanaged(u32) = .empty;
+    var verstrings: std.ArrayList(u32) = .empty;
     defer verstrings.deinit(gpa);
 
     if (header.verdef_sect_index) |shndx| {
         const shdr = header.sections[shndx];
-        const verdefs = try Elf.preadAllAlloc(gpa, fs_file, shdr.sh_offset, shdr.sh_size);
+        const verdefs = try Elf.preadAllAlloc(gpa, io, file, shdr.sh_offset, shdr.sh_size);
         defer gpa.free(verdefs);
 
         var offset: u32 = 0;
@@ -237,19 +256,19 @@ pub fn parse(
         const versyms = try gpa.alloc(elf.Versym, symtab.len);
         errdefer gpa.free(versyms);
         const buf = mem.sliceAsBytes(versyms);
-        const amt = try fs_file.preadAll(buf, shdr.sh_offset);
+        const amt = try file.readPositionalAll(io, buf, shdr.sh_offset);
         if (amt != buf.len) return error.UnexpectedEndOfFile;
         break :vs versyms;
     } else &.{};
     defer gpa.free(versyms);
 
-    var nonlocal_esyms: std.ArrayListUnmanaged(elf.Elf64_Sym) = .empty;
+    var nonlocal_esyms: std.ArrayList(elf.Elf64_Sym) = .empty;
     defer nonlocal_esyms.deinit(gpa);
 
-    var nonlocal_versyms: std.ArrayListUnmanaged(elf.Versym) = .empty;
+    var nonlocal_versyms: std.ArrayList(elf.Versym) = .empty;
     defer nonlocal_versyms.deinit(gpa);
 
-    var nonlocal_symbols: std.ArrayListUnmanaged(Parsed.Symbol) = .empty;
+    var nonlocal_symbols: std.ArrayList(Parsed.Symbol) = .empty;
     defer nonlocal_symbols.deinit(gpa);
 
     var strtab = header.strtab;
@@ -534,19 +553,3 @@ const Format = struct {
         }
     }
 };
-
-const SharedObject = @This();
-
-const std = @import("std");
-const assert = std.debug.assert;
-const elf = std.elf;
-const log = std.log.scoped(.elf);
-const mem = std.mem;
-const Path = std.Build.Cache.Path;
-const Stat = std.Build.Cache.File.Stat;
-const Allocator = mem.Allocator;
-
-const Elf = @import("../Elf.zig");
-const File = @import("file.zig").File;
-const Symbol = @import("Symbol.zig");
-const Diags = @import("../../link.zig").Diags;

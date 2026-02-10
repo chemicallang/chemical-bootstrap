@@ -1,12 +1,15 @@
+const Compile = @This();
 const builtin = @import("builtin");
+
 const std = @import("std");
+const Io = std.Io;
 const mem = std.mem;
 const fs = std.fs;
 const assert = std.debug.assert;
 const panic = std.debug.panic;
 const StringHashMap = std.StringHashMap;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const Allocator = mem.Allocator;
+const Allocator = std.mem.Allocator;
 const Step = std.Build.Step;
 const LazyPath = std.Build.LazyPath;
 const PkgConfigPkg = std.Build.PkgConfigPkg;
@@ -15,7 +18,6 @@ const RunError = std.Build.RunError;
 const Module = std.Build.Module;
 const InstallDir = std.Build.InstallDir;
 const GeneratedFile = std.Build.GeneratedFile;
-const Compile = @This();
 const Path = std.Build.Cache.Path;
 
 pub const base_id: Step.Id = .compile;
@@ -135,6 +137,9 @@ link_z_common_page_size: ?u64 = null,
 /// Maximum page size
 link_z_max_page_size: ?u64 = null,
 
+/// Force a fatal error if any undefined symbols remain.
+link_z_defs: bool = false,
+
 /// (Darwin) Install name for the dylib
 install_name: ?[]const u8 = null,
 
@@ -184,9 +189,6 @@ force_undefined_symbols: std.StringHashMap(void),
 
 /// Overrides the default stack size
 stack_size: ?u64 = null,
-
-/// Deprecated; prefer using `lto`.
-want_lto: ?bool = null,
 
 use_llvm: ?bool,
 use_lld: ?bool,
@@ -369,7 +371,7 @@ pub const TestRunner = struct {
 
 pub fn create(owner: *std.Build, options: Options) *Compile {
     const name = owner.dupe(options.name);
-    if (mem.indexOf(u8, name, "/") != null or mem.indexOf(u8, name, "\\") != null) {
+    if (mem.find(u8, name, "/") != null or mem.find(u8, name, "\\") != null) {
         panic("invalid name: '{s}'. It looks like a file path, but it is supposed to be the library or application name.", .{name});
     }
 
@@ -537,7 +539,7 @@ pub fn installHeadersDirectory(
 /// When a module links with this artifact, all headers marked for installation are added to that
 /// module's include search path.
 pub fn installConfigHeader(cs: *Compile, config_header: *Step.ConfigHeader) void {
-    cs.installHeader(config_header.getOutput(), config_header.include_path);
+    cs.installHeader(config_header.getOutputFile(), config_header.include_path);
 }
 
 /// Forwards all headers marked for installation from `lib` to this artifact.
@@ -680,18 +682,6 @@ pub fn producesImplib(compile: *Compile) bool {
     return compile.isDll();
 }
 
-/// Deprecated; use `compile.root_module.link_libc = true` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn linkLibC(compile: *Compile) void {
-    compile.root_module.link_libc = true;
-}
-
-/// Deprecated; use `compile.root_module.link_libcpp = true` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn linkLibCpp(compile: *Compile) void {
-    compile.root_module.link_libcpp = true;
-}
-
 const PkgConfigResult = struct {
     cflags: []const []const u8,
     libs: []const []const u8,
@@ -728,7 +718,7 @@ fn runPkgConfig(compile: *Compile, lib_name: []const u8) !PkgConfigResult {
 
         // Prefixed "lib" or suffixed ".0".
         for (pkgs) |pkg| {
-            if (std.ascii.indexOfIgnoreCase(pkg.name, lib_name)) |pos| {
+            if (std.ascii.findIgnoreCase(pkg.name, lib_name)) |pos| {
                 const prefix = pkg.name[0..pos];
                 const suffix = pkg.name[pos + lib_name.len ..];
                 if (prefix.len > 0 and !mem.eql(u8, prefix, "lib")) continue;
@@ -751,13 +741,13 @@ fn runPkgConfig(compile: *Compile, lib_name: []const u8) !PkgConfigResult {
     };
 
     var code: u8 = undefined;
-    const pkg_config_exe = b.graph.env_map.get("PKG_CONFIG") orelse "pkg-config";
+    const pkg_config_exe = b.graph.environ_map.get("PKG_CONFIG") orelse "pkg-config";
     const stdout = if (b.runAllowFail(&[_][]const u8{
         pkg_config_exe,
         pkg_name,
         "--cflags",
         "--libs",
-    }, &code, .Ignore)) |stdout| stdout else |err| switch (err) {
+    }, &code, .ignore)) |stdout| stdout else |err| switch (err) {
         error.ProcessTerminated => return error.PkgConfigCrashed,
         error.ExecNotSupported => return error.PkgConfigFailed,
         error.ExitCodeFailure => return error.PkgConfigFailed,
@@ -803,46 +793,6 @@ fn runPkgConfig(compile: *Compile, lib_name: []const u8) !PkgConfigResult {
         .cflags = try zig_cflags.toOwnedSlice(),
         .libs = try zig_libs.toOwnedSlice(),
     };
-}
-
-/// Deprecated; use `compile.root_module.linkSystemLibrary(name, .{})` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn linkSystemLibrary(compile: *Compile, name: []const u8) void {
-    return compile.root_module.linkSystemLibrary(name, .{});
-}
-
-/// Deprecated; use `compile.root_module.linkSystemLibrary(name, options)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn linkSystemLibrary2(
-    compile: *Compile,
-    name: []const u8,
-    options: Module.LinkSystemLibraryOptions,
-) void {
-    return compile.root_module.linkSystemLibrary(name, options);
-}
-
-/// Deprecated; use `c.root_module.linkFramework(name, .{})` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn linkFramework(c: *Compile, name: []const u8) void {
-    c.root_module.linkFramework(name, .{});
-}
-
-/// Deprecated; use `compile.root_module.addCSourceFiles(options)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addCSourceFiles(compile: *Compile, options: Module.AddCSourceFilesOptions) void {
-    compile.root_module.addCSourceFiles(options);
-}
-
-/// Deprecated; use `compile.root_module.addCSourceFile(source)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addCSourceFile(compile: *Compile, source: Module.CSourceFile) void {
-    compile.root_module.addCSourceFile(source);
-}
-
-/// Deprecated; use `compile.root_module.addWin32ResourceFile(source)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addWin32ResourceFile(compile: *Compile, source: Module.RcSourceFile) void {
-    compile.root_module.addWin32ResourceFile(source);
 }
 
 pub fn setVerboseLink(compile: *Compile, value: bool) void {
@@ -926,84 +876,6 @@ pub fn getEmittedLlvmBc(compile: *Compile) LazyPath {
     return compile.getEmittedFileGeneric(&compile.generated_llvm_bc);
 }
 
-/// Deprecated; use `compile.root_module.addAssemblyFile(source)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addAssemblyFile(compile: *Compile, source: LazyPath) void {
-    compile.root_module.addAssemblyFile(source);
-}
-
-/// Deprecated; use `compile.root_module.addObjectFile(source)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addObjectFile(compile: *Compile, source: LazyPath) void {
-    compile.root_module.addObjectFile(source);
-}
-
-/// Deprecated; use `compile.root_module.addObject(object)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addObject(compile: *Compile, object: *Compile) void {
-    compile.root_module.addObject(object);
-}
-
-/// Deprecated; use `compile.root_module.linkLibrary(library)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn linkLibrary(compile: *Compile, library: *Compile) void {
-    compile.root_module.linkLibrary(library);
-}
-
-/// Deprecated; use `compile.root_module.addAfterIncludePath(lazy_path)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addAfterIncludePath(compile: *Compile, lazy_path: LazyPath) void {
-    compile.root_module.addAfterIncludePath(lazy_path);
-}
-
-/// Deprecated; use `compile.root_module.addSystemIncludePath(lazy_path)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addSystemIncludePath(compile: *Compile, lazy_path: LazyPath) void {
-    compile.root_module.addSystemIncludePath(lazy_path);
-}
-
-/// Deprecated; use `compile.root_module.addIncludePath(lazy_path)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addIncludePath(compile: *Compile, lazy_path: LazyPath) void {
-    compile.root_module.addIncludePath(lazy_path);
-}
-
-/// Deprecated; use `compile.root_module.addConfigHeader(config_header)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addConfigHeader(compile: *Compile, config_header: *Step.ConfigHeader) void {
-    compile.root_module.addConfigHeader(config_header);
-}
-
-/// Deprecated; use `compile.root_module.addEmbedPath(lazy_path)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addEmbedPath(compile: *Compile, lazy_path: LazyPath) void {
-    compile.root_module.addEmbedPath(lazy_path);
-}
-
-/// Deprecated; use `compile.root_module.addLibraryPath(directory_path)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addLibraryPath(compile: *Compile, directory_path: LazyPath) void {
-    compile.root_module.addLibraryPath(directory_path);
-}
-
-/// Deprecated; use `compile.root_module.addRPath(directory_path)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addRPath(compile: *Compile, directory_path: LazyPath) void {
-    compile.root_module.addRPath(directory_path);
-}
-
-/// Deprecated; use `compile.root_module.addSystemFrameworkPath(directory_path)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addSystemFrameworkPath(compile: *Compile, directory_path: LazyPath) void {
-    compile.root_module.addSystemFrameworkPath(directory_path);
-}
-
-/// Deprecated; use `compile.root_module.addFrameworkPath(directory_path)` instead.
-/// To be removed after 0.15.0 is tagged.
-pub fn addFrameworkPath(compile: *Compile, directory_path: LazyPath) void {
-    compile.root_module.addFrameworkPath(directory_path);
-}
-
 pub fn setExecCmd(compile: *Compile, args: []const ?[]const u8) void {
     const b = compile.step.owner;
     assert(compile.kind == .@"test");
@@ -1050,20 +922,24 @@ const CliNamedModules = struct {
     }
 };
 
-fn getGeneratedFilePath(compile: *Compile, comptime tag_name: []const u8, asking_step: ?*Step) []const u8 {
+fn getGeneratedFilePath(compile: *Compile, comptime tag_name: []const u8, asking_step: ?*Step) ![]const u8 {
+    const step = &compile.step;
+    const b = step.owner;
+    const graph = b.graph;
+    const io = graph.io;
     const maybe_path: ?*GeneratedFile = @field(compile, tag_name);
 
     const generated_file = maybe_path orelse {
-        const w, const ttyconf = std.debug.lockStderrWriter(&.{});
-        std.Build.dumpBadGetPathHelp(&compile.step, w, ttyconf, compile.step.owner, asking_step) catch {};
-        std.debug.unlockStderrWriter();
+        const stderr = try io.lockStderr(&.{}, graph.stderr_mode);
+        std.Build.dumpBadGetPathHelp(&compile.step, stderr.terminal(), compile.step.owner, asking_step) catch {};
+        io.unlockStderr();
         @panic("missing emit option for " ++ tag_name);
     };
 
     const path = generated_file.path orelse {
-        const w, const ttyconf = std.debug.lockStderrWriter(&.{});
-        std.Build.dumpBadGetPathHelp(&compile.step, w, ttyconf, compile.step.owner, asking_step) catch {};
-        std.debug.unlockStderrWriter();
+        const stderr = try io.lockStderr(&.{}, graph.stderr_mode);
+        std.Build.dumpBadGetPathHelp(&compile.step, stderr.terminal(), compile.step.owner, asking_step) catch {};
+        io.unlockStderr();
         @panic(tag_name ++ " is null. Is there a missing step dependency?");
     };
 
@@ -1277,9 +1153,9 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
                                     // For everything else, we directly link
                                     // against the library file.
                                     const full_path_lib = if (other_produces_implib)
-                                        other.getGeneratedFilePath("generated_implib", &compile.step)
+                                        try other.getGeneratedFilePath("generated_implib", &compile.step)
                                     else
-                                        other.getGeneratedFilePath("generated_bin", &compile.step);
+                                        try other.getGeneratedFilePath("generated_bin", &compile.step);
 
                                     try zig_args.append(full_path_lib);
                                     total_linker_objects += 1;
@@ -1550,6 +1426,10 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
         try zig_args.append("-z");
         try zig_args.append(b.fmt("max-page-size={d}", .{size}));
     }
+    if (compile.link_z_defs) {
+        try zig_args.append("-z");
+        try zig_args.append("defs");
+    }
 
     if (compile.libc_file) |libc_file| {
         try zig_args.append("--libc");
@@ -1687,19 +1567,22 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
     }
 
     // -I and -L arguments that appear after the last --mod argument apply to all modules.
+    const cwd: Io.Dir = .cwd();
+    const io = b.graph.io;
+
     for (b.search_prefixes.items) |search_prefix| {
-        var prefix_dir = fs.cwd().openDir(search_prefix, .{}) catch |err| {
+        var prefix_dir = cwd.openDir(io, search_prefix, .{}) catch |err| {
             return step.fail("unable to open prefix directory '{s}': {s}", .{
                 search_prefix, @errorName(err),
             });
         };
-        defer prefix_dir.close();
+        defer prefix_dir.close(io);
 
         // Avoid passing -L and -I flags for nonexistent directories.
         // This prevents a warning, that should probably be upgraded to an error in Zig's
         // CLI parsing code, when the linker sees an -L directory that does not exist.
 
-        if (prefix_dir.access("lib", .{})) |_| {
+        if (prefix_dir.access(io, "lib", .{})) |_| {
             try zig_args.appendSlice(&.{
                 "-L", b.pathJoin(&.{ search_prefix, "lib" }),
             });
@@ -1710,7 +1593,7 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
             }),
         }
 
-        if (prefix_dir.access("include", .{})) |_| {
+        if (prefix_dir.access(io, "include", .{})) |_| {
             try zig_args.appendSlice(&.{
                 "-I", b.pathJoin(&.{ search_prefix, "include" }),
             });
@@ -1756,7 +1639,7 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
             .thin => "-flto=thin",
             .none => "-fno-lto",
         });
-    } else try addFlag(&zig_args, "lto", compile.want_lto);
+    }
 
     try addFlag(&zig_args, "sanitize-coverage-trace-pc-guard", compile.sanitize_coverage_trace_pc_guard);
 
@@ -1786,7 +1669,7 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
         args_length += arg.len + 1; // +1 to account for null terminator
     }
     if (args_length >= 30 * 1024) {
-        try b.cache_root.handle.makePath("args");
+        try b.cache_root.handle.createDirPath(io, "args");
 
         const args_to_escape = zig_args.items[2..];
         var escaped_args = try std.array_list.Managed([]const u8).initCapacity(arena, args_to_escape.len);
@@ -1794,7 +1677,7 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
             for (arg, 0..) |c, arg_idx| {
                 if (c == '\\' or c == '"') {
                     // Slow path for arguments that need to be escaped. We'll need to allocate and copy
-                    var escaped: std.ArrayListUnmanaged(u8) = .empty;
+                    var escaped: std.ArrayList(u8) = .empty;
                     try escaped.ensureTotalCapacityPrecise(arena, arg.len + 1);
                     try escaped.appendSlice(arena, arg[0..arg_idx]);
                     for (arg[arg_idx..]) |to_escape| {
@@ -1819,22 +1702,33 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
         _ = try std.fmt.bufPrint(&args_hex_hash, "{x}", .{&args_hash});
 
         const args_file = "args" ++ fs.path.sep_str ++ args_hex_hash;
-        if (b.cache_root.handle.access(args_file, .{})) |_| {
+        if (b.cache_root.handle.access(io, args_file, .{})) |_| {
             // The args file is already present from a previous run.
         } else |err| switch (err) {
             error.FileNotFound => {
-                try b.cache_root.handle.makePath("tmp");
-                const rand_int = std.crypto.random.int(u64);
-                const tmp_path = "tmp" ++ fs.path.sep_str ++ std.fmt.hex(rand_int);
-                try b.cache_root.handle.writeFile(.{ .sub_path = tmp_path, .data = args });
-                defer b.cache_root.handle.deleteFile(tmp_path) catch {
-                    // It's fine if the temporary file can't be cleaned up.
+                var af = b.cache_root.handle.createFileAtomic(io, args_file, .{
+                    .replace = false,
+                    .make_path = true,
+                }) catch |e| return step.fail("failed creating tmp args file {f}{s}: {t}", .{
+                    b.cache_root, args_file, e,
+                });
+                defer af.deinit(io);
+
+                af.file.writeStreamingAll(io, args) catch |e| {
+                    return step.fail("failed writing args data to tmp file {f}{s}: {t}", .{
+                        b.cache_root, args_file, e,
+                    });
                 };
-                b.cache_root.handle.rename(tmp_path, args_file) catch |rename_err| switch (rename_err) {
+                // Note we can't clean up this file, not even after build
+                // success, because that might interfere with another build
+                // process that needs the same file.
+                af.link(io) catch |e| switch (e) {
                     error.PathAlreadyExists => {
                         // The args file was created by another concurrent build process.
                     },
-                    else => |other_err| return other_err,
+                    else => |other_err| return step.fail("failed linking tmp file {f}{s}: {t}", .{
+                        b.cache_root, args_file, other_err,
+                    }),
                 };
             },
             else => |other_err| return other_err,
@@ -1925,6 +1819,11 @@ pub fn rebuildInFuzzMode(c: *Compile, gpa: Allocator, progress_node: std.Progres
     c.step.result_error_bundle.deinit(gpa);
     c.step.result_error_bundle = std.zig.ErrorBundle.empty;
 
+    if (c.step.result_failed_command) |cmd| {
+        gpa.free(cmd);
+        c.step.result_failed_command = null;
+    }
+
     const zig_args = try getZigArgs(c, true);
     const maybe_output_bin_path = try c.step.evalZigProcess(zig_args, progress_node, false, null, gpa);
     return maybe_output_bin_path.?;
@@ -1937,18 +1836,20 @@ pub fn doAtomicSymLinks(
     filename_name_only: []const u8,
 ) !void {
     const b = step.owner;
+    const io = b.graph.io;
     const out_dir = fs.path.dirname(output_path) orelse ".";
     const out_basename = fs.path.basename(output_path);
     // sym link for libfoo.so.1 to libfoo.so.1.2.3
     const major_only_path = b.pathJoin(&.{ out_dir, filename_major_only });
-    fs.cwd().atomicSymLink(out_basename, major_only_path, .{}) catch |err| {
+    const cwd: Io.Dir = .cwd();
+    cwd.symLinkAtomic(io, out_basename, major_only_path, .{}) catch |err| {
         return step.fail("unable to symlink {s} -> {s}: {s}", .{
             major_only_path, out_basename, @errorName(err),
         });
     };
     // sym link for libfoo.so to libfoo.so.1
     const name_only_path = b.pathJoin(&.{ out_dir, filename_name_only });
-    fs.cwd().atomicSymLink(filename_major_only, name_only_path, .{}) catch |err| {
+    cwd.symLinkAtomic(io, filename_major_only, name_only_path, .{}) catch |err| {
         return step.fail("Unable to symlink {s} -> {s}: {s}", .{
             name_only_path, filename_major_only, @errorName(err),
         });
@@ -1956,8 +1857,8 @@ pub fn doAtomicSymLinks(
 }
 
 fn execPkgConfigList(b: *std.Build, out_code: *u8) (PkgConfigError || RunError)![]const PkgConfigPkg {
-    const pkg_config_exe = b.graph.env_map.get("PKG_CONFIG") orelse "pkg-config";
-    const stdout = try b.runAllowFail(&[_][]const u8{ pkg_config_exe, "--list-all" }, out_code, .Ignore);
+    const pkg_config_exe = b.graph.environ_map.get("PKG_CONFIG") orelse "pkg-config";
+    const stdout = try b.runAllowFail(&[_][]const u8{ pkg_config_exe, "--list-all" }, out_code, .ignore);
     var list = std.array_list.Managed(PkgConfigPkg).init(b.allocator);
     errdefer list.deinit();
     var line_it = mem.tokenizeAny(u8, stdout, "\r\n");
@@ -2018,12 +1919,12 @@ fn checkCompileErrors(compile: *Compile) !void {
         try actual_eb.renderToWriter(.{
             .include_reference_trace = false,
             .include_source_line = false,
-        }, &aw.writer, .no_color);
+        }, &aw.writer);
         break :ae try aw.toOwnedSlice();
     };
 
     // Render the expected lines into a string that we can compare verbatim.
-    var expected_generated: std.ArrayListUnmanaged(u8) = .empty;
+    var expected_generated: std.ArrayList(u8) = .empty;
     const expect_errors = compile.expect_errors.?;
 
     var actual_line_it = mem.splitScalar(u8, actual_errors, '\n');
@@ -2117,7 +2018,7 @@ fn matchCompileError(actual: []const u8, expected: []const u8) bool {
     // We scan for /?/ in expected line and if there is a match, we match everything
     // up to and after /?/.
     const expected_trim = mem.trim(u8, expected, " ");
-    if (mem.indexOf(u8, expected_trim, "/?/")) |index| {
+    if (mem.find(u8, expected_trim, "/?/")) |index| {
         const actual_trim = mem.trim(u8, actual, " ");
         const lhs = expected_trim[0..index];
         const rhs = expected_trim[index + "/?/".len ..];

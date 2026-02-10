@@ -20,6 +20,7 @@ const native_endian = builtin.cpu.arch.endian();
 const build_options = @import("build_options");
 
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Cache = std.Build.Cache;
 const Path = Cache.Path;
@@ -53,7 +54,7 @@ base: link.File,
 /// with a null byte so that deserialization does not attempt to create
 /// string_table entries for them. Alternately those sites could be moved to
 /// use a different byte array for this purpose.
-string_bytes: std.ArrayListUnmanaged(u8),
+string_bytes: std.ArrayList(u8),
 /// Sometimes we have logic that wants to borrow string bytes to store
 /// arbitrary things in there. In this case it is not allowed to intern new
 /// strings during this time. This safety lock is used to detect misuses.
@@ -77,7 +78,7 @@ export_table: bool,
 /// Output name of the file
 name: []const u8,
 /// List of relocatable files to be linked into the final binary.
-objects: std.ArrayListUnmanaged(Object) = .{},
+objects: std.ArrayList(Object) = .{},
 
 func_types: std.AutoArrayHashMapUnmanaged(FunctionType, void) = .empty,
 /// Provides a mapping of both imports and provided functions to symbol name.
@@ -85,23 +86,23 @@ func_types: std.AutoArrayHashMapUnmanaged(FunctionType, void) = .empty,
 /// Key is symbol name, however the `FunctionImport` may have an name override for the import name.
 object_function_imports: std.AutoArrayHashMapUnmanaged(String, FunctionImport) = .empty,
 /// All functions for all objects.
-object_functions: std.ArrayListUnmanaged(ObjectFunction) = .empty,
+object_functions: std.ArrayList(ObjectFunction) = .empty,
 
 /// Provides a mapping of both imports and provided globals to symbol name.
 /// Local globals may be unnamed.
 object_global_imports: std.AutoArrayHashMapUnmanaged(String, GlobalImport) = .empty,
 /// All globals for all objects.
-object_globals: std.ArrayListUnmanaged(ObjectGlobal) = .empty,
+object_globals: std.ArrayList(ObjectGlobal) = .empty,
 
 /// All table imports for all objects.
 object_table_imports: std.AutoArrayHashMapUnmanaged(String, TableImport) = .empty,
 /// All parsed table sections for all objects.
-object_tables: std.ArrayListUnmanaged(Table) = .empty,
+object_tables: std.ArrayList(Table) = .empty,
 
 /// All memory imports for all objects.
 object_memory_imports: std.AutoArrayHashMapUnmanaged(String, MemoryImport) = .empty,
 /// All parsed memory sections for all objects.
-object_memories: std.ArrayListUnmanaged(ObjectMemory) = .empty,
+object_memories: std.ArrayList(ObjectMemory) = .empty,
 
 /// All relocations from all objects concatenated. `relocs_start` marks the end
 /// point of object relocations and start point of Zcu relocations.
@@ -109,21 +110,21 @@ object_relocations: std.MultiArrayList(ObjectRelocation) = .empty,
 
 /// List of initialization functions. These must be called in order of priority
 /// by the (synthetic) `__wasm_call_ctors` function.
-object_init_funcs: std.ArrayListUnmanaged(InitFunc) = .empty,
+object_init_funcs: std.ArrayList(InitFunc) = .empty,
 
 /// The data section of an object has many segments. Each segment corresponds
 /// logically to an object file's .data section, or .rodata section. In
 /// the case of `-fdata-sections` there will be one segment per data symbol.
-object_data_segments: std.ArrayListUnmanaged(ObjectDataSegment) = .empty,
+object_data_segments: std.ArrayList(ObjectDataSegment) = .empty,
 /// Each segment has many data symbols, which correspond logically to global
 /// constants.
-object_datas: std.ArrayListUnmanaged(ObjectData) = .empty,
+object_datas: std.ArrayList(ObjectData) = .empty,
 object_data_imports: std.AutoArrayHashMapUnmanaged(String, ObjectDataImport) = .empty,
 /// Non-synthetic section that can essentially be mem-cpy'd into place after performing relocations.
 object_custom_segments: std.AutoArrayHashMapUnmanaged(ObjectSectionIndex, CustomSegment) = .empty,
 
 /// All comdat information for all objects.
-object_comdats: std.ArrayListUnmanaged(Comdat) = .empty,
+object_comdats: std.ArrayList(Comdat) = .empty,
 /// A table that maps the relocations to be performed where the key represents
 /// the section (across all objects) that the slice of relocations applies to.
 object_relocations_table: std.AutoArrayHashMapUnmanaged(ObjectSectionIndex, ObjectRelocation.Slice) = .empty,
@@ -138,15 +139,15 @@ out_relocs: std.MultiArrayList(OutReloc) = .empty,
 /// List of locations within `string_bytes` that must be patched with the virtual
 /// memory address of a Uav during `flush`.
 /// When emitting an object file, `out_relocs` is used instead.
-uav_fixups: std.ArrayListUnmanaged(UavFixup) = .empty,
+uav_fixups: std.ArrayList(UavFixup) = .empty,
 /// List of locations within `string_bytes` that must be patched with the virtual
 /// memory address of a Nav during `flush`.
 /// When emitting an object file, `out_relocs` is used instead.
 /// No functions here only global variables.
-nav_fixups: std.ArrayListUnmanaged(NavFixup) = .empty,
+nav_fixups: std.ArrayList(NavFixup) = .empty,
 /// When a nav reference is a function pointer, this tracks the required function
 /// table entry index that needs to overwrite the code in the final output.
-func_table_fixups: std.ArrayListUnmanaged(FuncTableFixup) = .empty,
+func_table_fixups: std.ArrayList(FuncTableFixup) = .empty,
 /// Symbols to be emitted into an object file. Remains empty when not emitting
 /// an object file.
 symbol_table: std.AutoArrayHashMapUnmanaged(String, void) = .empty,
@@ -167,7 +168,7 @@ memories: std.wasm.Memory = .{ .limits = .{
 /// `--verbose-link` output.
 /// Initialized on creation, appended to as inputs are added, printed during `flush`.
 /// String data is allocated into Compilation arena.
-dump_argv_list: std.ArrayListUnmanaged([]const u8),
+dump_argv_list: std.ArrayList([]const u8),
 
 preloaded_strings: PreloadedStrings,
 
@@ -205,7 +206,7 @@ entry_resolution: FunctionImport.Resolution = .unresolved,
 /// Empty when outputting an object.
 function_exports: std.AutoArrayHashMapUnmanaged(String, FunctionIndex) = .empty,
 hidden_function_exports: std.AutoArrayHashMapUnmanaged(String, FunctionIndex) = .empty,
-global_exports: std.ArrayListUnmanaged(GlobalExport) = .empty,
+global_exports: std.ArrayList(GlobalExport) = .empty,
 /// Tracks the value at the end of prelink.
 global_exports_len: u32 = 0,
 
@@ -279,22 +280,22 @@ any_passive_inits: bool = false,
 /// All MIR instructions for all Zcu functions.
 mir_instructions: std.MultiArrayList(Mir.Inst) = .{},
 /// Corresponds to `mir_instructions`.
-mir_extra: std.ArrayListUnmanaged(u32) = .empty,
+mir_extra: std.ArrayList(u32) = .empty,
 /// All local types for all Zcu functions.
-mir_locals: std.ArrayListUnmanaged(std.wasm.Valtype) = .empty,
+mir_locals: std.ArrayList(std.wasm.Valtype) = .empty,
 
-params_scratch: std.ArrayListUnmanaged(std.wasm.Valtype) = .empty,
-returns_scratch: std.ArrayListUnmanaged(std.wasm.Valtype) = .empty,
+params_scratch: std.ArrayList(std.wasm.Valtype) = .empty,
+returns_scratch: std.ArrayList(std.wasm.Valtype) = .empty,
 
 /// All Zcu error names in order, null-terminated, concatenated. No need to
 /// serialize; trivially reconstructed.
-error_name_bytes: std.ArrayListUnmanaged(u8) = .empty,
+error_name_bytes: std.ArrayList(u8) = .empty,
 /// For each Zcu error, in order, offset into `error_name_bytes` where the name
 /// is stored. No need to serialize; trivially reconstructed.
-error_name_offs: std.ArrayListUnmanaged(u32) = .empty,
+error_name_offs: std.ArrayList(u32) = .empty,
 
-tag_name_bytes: std.ArrayListUnmanaged(u8) = .empty,
-tag_name_offs: std.ArrayListUnmanaged(u32) = .empty,
+tag_name_bytes: std.ArrayList(u8) = .empty,
+tag_name_offs: std.ArrayList(u32) = .empty,
 
 pub const TagNameOff = extern struct {
     off: u32,
@@ -428,7 +429,11 @@ pub const OutputFunctionIndex = enum(u32) {
 
     pub fn fromSymbolName(wasm: *const Wasm, name: String) OutputFunctionIndex {
         if (wasm.flush_buffer.function_imports.getIndex(name)) |i| return @enumFromInt(i);
-        return fromFunctionIndex(wasm, FunctionIndex.fromSymbolName(wasm, name).?);
+        return fromFunctionIndex(wasm, FunctionIndex.fromSymbolName(wasm, name) orelse {
+            if (std.debug.runtime_safety) {
+                std.debug.panic("function index for symbol not found: {s}", .{name.slice(wasm)});
+            } else unreachable;
+        });
     }
 };
 
@@ -2996,16 +3001,18 @@ pub fn createEmpty(
         .named => |name| (try wasm.internString(name)).toOptional(),
     };
 
-    wasm.base.file = try emit.root_dir.handle.createFile(emit.sub_path, .{
+    const io = comp.io;
+
+    wasm.base.file = try emit.root_dir.handle.createFile(io, emit.sub_path, .{
         .truncate = true,
         .read = true,
-        .mode = if (fs.has_executable_bit)
+        .permissions = if (Io.File.Permissions.has_executable_bit)
             if (target.os.tag == .wasi and output_mode == .Exe)
-                fs.File.default_mode | 0b001_000_000
+                .executable_file
             else
-                fs.File.default_mode
+                .default_file
         else
-            0,
+            .default_file,
     });
     wasm.name = emit.sub_path;
 
@@ -3013,14 +3020,16 @@ pub fn createEmpty(
 }
 
 fn openParseObjectReportingFailure(wasm: *Wasm, path: Path) void {
-    const diags = &wasm.base.comp.link_diags;
-    const obj = link.openObject(path, false, false) catch |err| {
-        switch (diags.failParse(path, "failed to open object: {s}", .{@errorName(err)})) {
+    const comp = wasm.base.comp;
+    const io = comp.io;
+    const diags = &comp.link_diags;
+    const obj = link.openObject(io, path, false, false) catch |err| {
+        switch (diags.failParse(path, "failed to open object: {t}", .{err})) {
             error.LinkFailure => return,
         }
     };
     wasm.parseObject(obj) catch |err| {
-        switch (diags.failParse(path, "failed to parse object: {s}", .{@errorName(err)})) {
+        switch (diags.failParse(path, "failed to parse object: {t}", .{err})) {
             error.LinkFailure => return,
         }
     };
@@ -3032,7 +3041,7 @@ fn parseObject(wasm: *Wasm, obj: link.Input.Object) !void {
     const io = wasm.base.comp.io;
     const gc_sections = wasm.base.gc_sections;
 
-    defer obj.file.close();
+    defer obj.file.close(io);
 
     var file_reader = obj.file.reader(io, &.{});
 
@@ -3060,7 +3069,7 @@ fn parseArchive(wasm: *Wasm, obj: link.Input.Object) !void {
     const io = wasm.base.comp.io;
     const gc_sections = wasm.base.gc_sections;
 
-    defer obj.file.close();
+    defer obj.file.close(io);
 
     var file_reader = obj.file.reader(io, &.{});
 
@@ -3393,10 +3402,11 @@ pub fn updateExports(
 pub fn loadInput(wasm: *Wasm, input: link.Input) !void {
     const comp = wasm.base.comp;
     const gpa = comp.gpa;
+    const io = comp.io;
 
     if (comp.verbose_link) {
-        comp.mutex.lock(); // protect comp.arena
-        defer comp.mutex.unlock();
+        comp.mutex.lockUncancelable(io); // protect comp.arena
+        defer comp.mutex.unlock(io);
 
         const argv = &wasm.dump_argv_list;
         switch (input) {
@@ -3528,7 +3538,10 @@ pub fn markFunctionImport(
     import: *FunctionImport,
     func_index: FunctionImport.Index,
 ) link.File.FlushError!void {
-    if (import.flags.alive) return;
+    // import.flags.alive might be already true from a previous update. In such
+    // case, we must still run the logic in this function, in case the item
+    // being marked was reverted by the `flush` logic that resets the hash
+    // table watermarks.
     import.flags.alive = true;
 
     const comp = wasm.base.comp;
@@ -3548,8 +3561,9 @@ pub fn markFunctionImport(
         } else {
             try wasm.function_imports.put(gpa, name, .fromObject(func_index, wasm));
         }
-    } else {
-        try markFunction(wasm, import.resolution.unpack(wasm).object_function, import.flags.exported);
+    } else switch (import.resolution.unpack(wasm)) {
+        .object_function => try markFunction(wasm, import.resolution.unpack(wasm).object_function, import.flags.exported),
+        else => return,
     }
 }
 
@@ -3588,7 +3602,10 @@ fn markGlobalImport(
     import: *GlobalImport,
     global_index: GlobalImport.Index,
 ) link.File.FlushError!void {
-    if (import.flags.alive) return;
+    // import.flags.alive might be already true from a previous update. In such
+    // case, we must still run the logic in this function, in case the item
+    // being marked was reverted by the `flush` logic that resets the hash
+    // table watermarks.
     import.flags.alive = true;
 
     const comp = wasm.base.comp;
@@ -3618,8 +3635,9 @@ fn markGlobalImport(
         } else {
             try wasm.global_imports.put(gpa, name, .fromObject(global_index, wasm));
         }
-    } else {
-        try markGlobal(wasm, import.resolution.unpack(wasm).object_global, import.flags.exported);
+    } else switch (import.resolution.unpack(wasm)) {
+        .object_global => try markGlobal(wasm, import.resolution.unpack(wasm).object_global, import.flags.exported),
+        else => return,
     }
 }
 
@@ -3822,8 +3840,9 @@ pub fn flush(
     const comp = wasm.base.comp;
     const diags = &comp.link_diags;
     const gpa = comp.gpa;
+    const io = comp.io;
 
-    if (comp.verbose_link) Compilation.dump_argv(wasm.dump_argv_list.items);
+    if (comp.verbose_link) try Compilation.dumpArgv(io, wasm.dump_argv_list.items);
 
     if (wasm.base.zcu_object_basename) |raw| {
         const zcu_obj_path: Path = try comp.resolveEmitPathFlush(arena, .temp, raw);
@@ -4036,7 +4055,7 @@ pub fn tagNameSymbolIndex(wasm: *Wasm, ip_index: InternPool.Index) Allocator.Err
     const comp = wasm.base.comp;
     assert(comp.config.output_mode == .Obj);
     const gpa = comp.gpa;
-    const name = try wasm.internStringFmt("__zig_tag_name_{d}", .{@intFromEnum(ip_index)});
+    const name = try wasm.internStringFmt("__zig_tag_name_{d}", .{ip_index});
     const gop = try wasm.symbol_table.getOrPut(gpa, name);
     gop.value_ptr.* = {};
     return @enumFromInt(gop.index);
@@ -4196,8 +4215,8 @@ fn convertZcuFnType(
     params: []const InternPool.Index,
     return_type: Zcu.Type,
     target: *const std.Target,
-    params_buffer: *std.ArrayListUnmanaged(std.wasm.Valtype),
-    returns_buffer: *std.ArrayListUnmanaged(std.wasm.Valtype),
+    params_buffer: *std.ArrayList(std.wasm.Valtype),
+    returns_buffer: *std.ArrayList(std.wasm.Valtype),
 ) Allocator.Error!void {
     params_buffer.clearRetainingCapacity();
     returns_buffer.clearRetainingCapacity();

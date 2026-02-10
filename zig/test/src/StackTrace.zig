@@ -44,12 +44,15 @@ fn addCaseTarget(
     target: *const std.Build.ResolvedTarget,
     triple: ?[]const u8,
 ) void {
-    const both_backends = switch (target.result.cpu.arch) {
-        .x86_64 => switch (target.result.ofmt) {
-            .elf => !target.result.os.tag.isBSD() and target.result.os.tag != .illumos,
+    const both_backends = b: {
+        if (comptime builtin.cpu.arch.endian() == .big) break :b false; // https://github.com/ziglang/zig/issues/25961
+        break :b switch (target.result.cpu.arch) {
+            .x86_64 => switch (target.result.ofmt) {
+                .elf => !target.result.os.tag.isBSD() and target.result.os.tag != .illumos,
+                else => false,
+            },
             else => false,
-        },
-        else => false,
+        };
     };
     const both_pie = switch (target.result.os.tag) {
         .fuchsia, .openbsd => false,
@@ -190,9 +193,9 @@ fn addCaseInstance(
     run.removeEnvironmentVariable("CLICOLOR_FORCE");
     run.setEnvironmentVariable("NO_COLOR", "1");
     run.addCheck(.{ .expect_term = term: {
-        if (!expect_panic) break :term .{ .Exited = 0 };
-        if (target.result.os.tag == .windows) break :term .{ .Exited = 3 };
-        break :term .{ .Signal = 6 };
+        if (!expect_panic) break :term .{ .exited = 0 };
+        if (target.result.os.tag == .windows) break :term .{ .exited = 3 };
+        break :term .{ .signal = @enumFromInt(6) };
     } });
     run.expectStdOutEqual("");
 

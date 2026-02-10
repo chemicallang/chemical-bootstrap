@@ -26,6 +26,7 @@ FOR /F "tokens=2,3 delims=-" %%i IN ("%TARGET%") DO (
   IF "%%i"=="macos" set "TARGET_OS_CMAKE=Darwin"
   IF "%%i"=="freebsd" set "TARGET_OS_CMAKE=FreeBSD"
   IF "%%i"=="netbsd" set "TARGET_OS_CMAKE=NetBSD"
+  IF "%%i"=="openbsd" set "TARGET_OS_CMAKE=OpenBSD"
   IF "%%i"=="windows" set "TARGET_OS_CMAKE=Windows"
   IF "%%i"=="linux" set "TARGET_OS_CMAKE=Linux"
   set TARGET_ABI=%%j
@@ -36,7 +37,7 @@ if "%VSCMD_ARG_HOST_ARCH%"=="x86" set OUTDIR=out-win-x86
 
 set ROOTDIR=%~dp0
 set "ROOTDIR_CMAKE=%ROOTDIR:\=/%"
-set ZIG_VERSION="0.16.0-dev.1354+94e98bfe8"
+set ZIG_VERSION="0.16.0-dev.2287+eb3f16db5"
 set JOBS_ARG=
 
 pushd %ROOTDIR%

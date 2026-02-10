@@ -26,10 +26,10 @@ files: std.MultiArrayList(File.Entry) = .{},
 /// Long-lived list of all file descriptors.
 /// We store them globally rather than per actual File so that we can re-use
 /// one file handle per every object file within an archive.
-file_handles: std.ArrayListUnmanaged(File.Handle) = .empty,
+file_handles: std.ArrayList(File.Handle) = .empty,
 zig_object_index: ?File.Index = null,
 linker_defined_index: ?File.Index = null,
-objects: std.ArrayListUnmanaged(File.Index) = .empty,
+objects: std.ArrayList(File.Index) = .empty,
 shared_objects: std.StringArrayHashMapUnmanaged(File.Index) = .empty,
 
 /// List of all output sections and their associated metadata.
@@ -49,23 +49,23 @@ page_size: u32,
 default_sym_version: elf.Versym,
 
 /// .shstrtab buffer
-shstrtab: std.ArrayListUnmanaged(u8) = .empty,
+shstrtab: std.ArrayList(u8) = .empty,
 /// .symtab buffer
-symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .empty,
+symtab: std.ArrayList(elf.Elf64_Sym) = .empty,
 /// .strtab buffer
-strtab: std.ArrayListUnmanaged(u8) = .empty,
+strtab: std.ArrayList(u8) = .empty,
 /// Dynamic symbol table. Only populated and emitted when linking dynamically.
 dynsym: DynsymSection = .{},
 /// .dynstrtab buffer
-dynstrtab: std.ArrayListUnmanaged(u8) = .empty,
+dynstrtab: std.ArrayList(u8) = .empty,
 /// Version symbol table. Only populated and emitted when linking dynamically.
-versym: std.ArrayListUnmanaged(elf.Versym) = .empty,
+versym: std.ArrayList(elf.Versym) = .empty,
 /// .verneed section
 verneed: VerneedSection = .{},
 /// .got section
 got: GotSection = .{},
 /// .rela.dyn section
-rela_dyn: std.ArrayListUnmanaged(elf.Elf64_Rela) = .empty,
+rela_dyn: std.ArrayList(elf.Elf64_Rela) = .empty,
 /// .dynamic section
 dynamic: DynamicSection = .{},
 /// .hash section
@@ -81,10 +81,10 @@ plt_got: PltGotSection = .{},
 /// .copyrel section
 copy_rel: CopyRelSection = .{},
 /// .rela.plt section
-rela_plt: std.ArrayListUnmanaged(elf.Elf64_Rela) = .empty,
+rela_plt: std.ArrayList(elf.Elf64_Rela) = .empty,
 /// SHT_GROUP sections
 /// Applies only to a relocatable.
-group_sections: std.ArrayListUnmanaged(GroupSection) = .empty,
+group_sections: std.ArrayList(GroupSection) = .empty,
 
 resolver: SymbolResolver = .{},
 
@@ -92,15 +92,15 @@ has_text_reloc: bool = false,
 num_ifunc_dynrelocs: usize = 0,
 
 /// List of range extension thunks.
-thunks: std.ArrayListUnmanaged(Thunk) = .empty,
+thunks: std.ArrayList(Thunk) = .empty,
 
 /// List of output merge sections with deduped contents.
-merge_sections: std.ArrayListUnmanaged(Merge.Section) = .empty,
+merge_sections: std.ArrayList(Merge.Section) = .empty,
 comment_merge_section_index: ?Merge.Section.Index = null,
 
 /// `--verbose-link` output.
 /// Initialized on creation, appended to as inputs are added, printed during `flush`.
-dump_argv_list: std.ArrayListUnmanaged([]const u8),
+dump_argv_list: std.ArrayList([]const u8),
 
 const SectionIndexes = struct {
     copy_rel: ?u32 = null,
@@ -127,7 +127,7 @@ const SectionIndexes = struct {
     symtab: ?u32 = null,
 };
 
-const ProgramHeaderList = std.ArrayListUnmanaged(elf.Elf64_Phdr);
+const ProgramHeaderList = std.ArrayList(elf.Elf64_Phdr);
 
 const OptionalProgramHeaderIndex = enum(u16) {
     none = std.math.maxInt(u16),
@@ -313,12 +313,14 @@ pub fn createEmpty(
     const is_obj = output_mode == .Obj;
     const is_obj_or_ar = is_obj or (output_mode == .Lib and link_mode == .static);
 
+    const io = comp.io;
+
     // What path should this ELF linker code output to?
     const sub_path = emit.sub_path;
-    self.base.file = try emit.root_dir.handle.createFile(sub_path, .{
+    self.base.file = try emit.root_dir.handle.createFile(io, sub_path, .{
         .truncate = true,
         .read = true,
-        .mode = link.File.determineMode(output_mode, link_mode),
+        .permissions = link.File.determinePermissions(output_mode, link_mode),
     });
 
     const gpa = comp.gpa;
@@ -406,10 +408,12 @@ pub fn open(
 }
 
 pub fn deinit(self: *Elf) void {
-    const gpa = self.base.comp.gpa;
+    const comp = self.base.comp;
+    const gpa = comp.gpa;
+    const io = comp.io;
 
     for (self.file_handles.items) |fh| {
-        fh.close();
+        fh.close(io);
     }
     self.file_handles.deinit(gpa);
 
@@ -483,6 +487,8 @@ pub fn getUavVAddr(self: *Elf, uav: InternPool.Index, reloc_info: link.File.Relo
 
 /// Returns end pos of collision, if any.
 fn detectAllocCollision(self: *Elf, start: u64, size: u64) !?u64 {
+    const comp = self.base.comp;
+    const io = comp.io;
     const small_ptr = self.ptr_width == .p32;
     const ehdr_size: u64 = if (small_ptr) @sizeOf(elf.Elf32_Ehdr) else @sizeOf(elf.Elf64_Ehdr);
     if (start < ehdr_size)
@@ -522,7 +528,7 @@ fn detectAllocCollision(self: *Elf, start: u64, size: u64) !?u64 {
         }
     }
 
-    if (at_end) try self.base.file.?.setEndPos(end);
+    if (at_end) try self.base.file.?.setLength(io, end);
     return null;
 }
 
@@ -552,6 +558,8 @@ pub fn findFreeSpace(self: *Elf, object_size: u64, min_alignment: u64) !u64 {
 }
 
 pub fn growSection(self: *Elf, shdr_index: u32, needed_size: u64, min_alignment: u64) !void {
+    const comp = self.base.comp;
+    const io = comp.io;
     const shdr = &self.sections.items(.shdr)[shdr_index];
 
     if (shdr.sh_type != elf.SHT_NOBITS) {
@@ -574,18 +582,11 @@ pub fn growSection(self: *Elf, shdr_index: u32, needed_size: u64, min_alignment:
                 new_offset,
             });
 
-            const amt = try self.base.file.?.copyRangeAll(
-                shdr.sh_offset,
-                self.base.file.?,
-                new_offset,
-                existing_size,
-            );
-            // TODO figure out what to about this error condition - how to communicate it up.
-            if (amt != existing_size) return error.InputOutput;
+            try self.base.copyRangeAll(shdr.sh_offset, new_offset, existing_size);
 
             shdr.sh_offset = new_offset;
         } else if (shdr.sh_offset + allocated_size == std.math.maxInt(u64)) {
-            try self.base.file.?.setEndPos(shdr.sh_offset + needed_size);
+            try self.base.file.?.setLength(io, shdr.sh_offset + needed_size);
         }
     }
 
@@ -713,6 +714,7 @@ pub fn allocateChunk(self: *Elf, args: struct {
 pub fn loadInput(self: *Elf, input: link.Input) !void {
     const comp = self.base.comp;
     const gpa = comp.gpa;
+    const io = comp.io;
     const diags = &comp.link_diags;
     const target = self.getTarget();
     const debug_fmt_strip = comp.config.debug_format == .strip;
@@ -720,8 +722,8 @@ pub fn loadInput(self: *Elf, input: link.Input) !void {
     const is_static_lib = self.base.isStaticLib();
 
     if (comp.verbose_link) {
-        comp.mutex.lock(); // protect comp.arena
-        defer comp.mutex.unlock();
+        comp.mutex.lockUncancelable(io); // protect comp.arena
+        defer comp.mutex.unlock(io);
 
         const argv = &self.dump_argv_list;
         switch (input) {
@@ -736,8 +738,8 @@ pub fn loadInput(self: *Elf, input: link.Input) !void {
         .res => unreachable,
         .dso_exact => @panic("TODO"),
         .object => |obj| try parseObject(self, obj),
-        .archive => |obj| try parseArchive(gpa, diags, &self.file_handles, &self.files, target, debug_fmt_strip, default_sym_version, &self.objects, obj, is_static_lib),
-        .dso => |dso| try parseDso(gpa, diags, dso, &self.shared_objects, &self.files, target),
+        .archive => |obj| try parseArchive(gpa, io, diags, &self.file_handles, &self.files, target, debug_fmt_strip, default_sym_version, &self.objects, obj, is_static_lib),
+        .dso => |dso| try parseDso(gpa, io, diags, dso, &self.shared_objects, &self.files, target),
     }
 }
 
@@ -746,9 +748,10 @@ pub fn flush(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std
     defer tracy.end();
 
     const comp = self.base.comp;
+    const io = comp.io;
     const diags = &comp.link_diags;
 
-    if (comp.verbose_link) Compilation.dump_argv(self.dump_argv_list.items);
+    if (comp.verbose_link) try Compilation.dumpArgv(io, self.dump_argv_list.items);
 
     const sub_prog_node = prog_node.start("ELF Flush", 0);
     defer sub_prog_node.end();
@@ -756,7 +759,7 @@ pub fn flush(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std
     return flushInner(self, arena, tid) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.LinkFailure => return error.LinkFailure,
-        else => |e| return diags.fail("ELF flush failed: {s}", .{@errorName(e)}),
+        else => |e| return diags.fail("ELF flush failed: {t}", .{e}),
     };
 }
 
@@ -1046,9 +1049,11 @@ fn dumpArgvInit(self: *Elf, arena: Allocator) !void {
 }
 
 pub fn openParseObjectReportingFailure(self: *Elf, path: Path) void {
-    const diags = &self.base.comp.link_diags;
-    const obj = link.openObject(path, false, false) catch |err| {
-        switch (diags.failParse(path, "failed to open object: {s}", .{@errorName(err)})) {
+    const comp = self.base.comp;
+    const io = comp.io;
+    const diags = &comp.link_diags;
+    const obj = link.openObject(io, path, false, false) catch |err| {
+        switch (diags.failParse(path, "failed to open object: {t}", .{err})) {
             error.LinkFailure => return,
         }
     };
@@ -1056,10 +1061,11 @@ pub fn openParseObjectReportingFailure(self: *Elf, path: Path) void {
 }
 
 fn parseObjectReportingFailure(self: *Elf, obj: link.Input.Object) void {
-    const diags = &self.base.comp.link_diags;
+    const comp = self.base.comp;
+    const diags = &comp.link_diags;
     self.parseObject(obj) catch |err| switch (err) {
         error.LinkFailure => return, // already reported
-        else => |e| diags.addParseError(obj.path, "failed to parse object: {s}", .{@errorName(e)}),
+        else => |e| diags.addParseError(obj.path, "failed to parse object: {t}", .{e}),
     };
 }
 
@@ -1067,10 +1073,12 @@ fn parseObject(self: *Elf, obj: link.Input.Object) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = self.base.comp.gpa;
-    const diags = &self.base.comp.link_diags;
-    const target = &self.base.comp.root_mod.resolved_target.result;
-    const debug_fmt_strip = self.base.comp.config.debug_format == .strip;
+    const comp = self.base.comp;
+    const io = comp.io;
+    const gpa = comp.gpa;
+    const diags = &comp.link_diags;
+    const target = &comp.root_mod.resolved_target.result;
+    const debug_fmt_strip = comp.config.debug_format == .strip;
     const default_sym_version = self.default_sym_version;
     const file_handles = &self.file_handles;
 
@@ -1089,21 +1097,22 @@ fn parseObject(self: *Elf, obj: link.Input.Object) !void {
     try self.objects.append(gpa, index);
 
     const object = self.file(index).?.object;
-    try object.parseCommon(gpa, diags, obj.path, handle, target);
+    try object.parseCommon(gpa, io, diags, obj.path, handle, target);
     if (!self.base.isStaticLib()) {
-        try object.parse(gpa, diags, obj.path, handle, target, debug_fmt_strip, default_sym_version);
+        try object.parse(gpa, io, diags, obj.path, handle, target, debug_fmt_strip, default_sym_version);
     }
 }
 
 fn parseArchive(
     gpa: Allocator,
+    io: Io,
     diags: *Diags,
-    file_handles: *std.ArrayListUnmanaged(File.Handle),
+    file_handles: *std.ArrayList(File.Handle),
     files: *std.MultiArrayList(File.Entry),
     target: *const std.Target,
     debug_fmt_strip: bool,
     default_sym_version: elf.Versym,
-    objects: *std.ArrayListUnmanaged(File.Index),
+    objects: *std.ArrayList(File.Index),
     obj: link.Input.Object,
     is_static_lib: bool,
 ) !void {
@@ -1111,7 +1120,7 @@ fn parseArchive(
     defer tracy.end();
 
     const fh = try addFileHandle(gpa, file_handles, obj.file);
-    var archive = try Archive.parse(gpa, diags, file_handles, obj.path, fh);
+    var archive = try Archive.parse(gpa, io, diags, file_handles, obj.path, fh);
     defer archive.deinit(gpa);
 
     const init_alive = if (is_static_lib) true else obj.must_link;
@@ -1122,15 +1131,16 @@ fn parseArchive(
         const object = &files.items(.data)[index].object;
         object.index = index;
         object.alive = init_alive;
-        try object.parseCommon(gpa, diags, obj.path, obj.file, target);
+        try object.parseCommon(gpa, io, diags, obj.path, obj.file, target);
         if (!is_static_lib)
-            try object.parse(gpa, diags, obj.path, obj.file, target, debug_fmt_strip, default_sym_version);
+            try object.parse(gpa, io, diags, obj.path, obj.file, target, debug_fmt_strip, default_sym_version);
         try objects.append(gpa, index);
     }
 }
 
 fn parseDso(
     gpa: Allocator,
+    io: Io,
     diags: *Diags,
     dso: link.Input.Dso,
     shared_objects: *std.StringArrayHashMapUnmanaged(File.Index),
@@ -1142,8 +1152,8 @@ fn parseDso(
 
     const handle = dso.file;
 
-    const stat = Stat.fromFs(try handle.stat());
-    var header = try SharedObject.parseHeader(gpa, diags, dso.path, handle, stat, target);
+    const stat = Stat.fromFs(try handle.stat(io));
+    var header = try SharedObject.parseHeader(gpa, io, diags, dso.path, handle, stat, target);
     defer header.deinit(gpa);
 
     const soname = header.soname() orelse dso.path.basename();
@@ -1157,7 +1167,7 @@ fn parseDso(
 
     gop.value_ptr.* = index;
 
-    var parsed = try SharedObject.parse(gpa, &header, handle);
+    var parsed = try SharedObject.parse(gpa, io, &header, handle);
     errdefer parsed.deinit(gpa);
 
     const duped_path: Path = .{
@@ -1748,7 +1758,7 @@ pub fn deleteExport(
 fn checkDuplicates(self: *Elf) !void {
     const gpa = self.base.comp.gpa;
 
-    var dupes = std.AutoArrayHashMap(SymbolResolver.Index, std.ArrayListUnmanaged(File.Index)).init(gpa);
+    var dupes = std.AutoArrayHashMap(SymbolResolver.Index, std.ArrayList(File.Index)).init(gpa);
     defer {
         for (dupes.values()) |*list| {
             list.deinit(gpa);
@@ -2887,13 +2897,7 @@ pub fn allocateAllocSections(self: *Elf) !void {
                 if (shdr.sh_offset > 0) {
                     // Get size actually commited to the output file.
                     const existing_size = self.sectionSize(shndx);
-                    const amt = try self.base.file.?.copyRangeAll(
-                        shdr.sh_offset,
-                        self.base.file.?,
-                        new_offset,
-                        existing_size,
-                    );
-                    if (amt != existing_size) return error.InputOutput;
+                    try self.base.copyRangeAll(shdr.sh_offset, new_offset, existing_size);
                 }
 
                 shdr.sh_offset = new_offset;
@@ -2929,13 +2933,7 @@ pub fn allocateNonAllocSections(self: *Elf) !void {
 
             if (shdr.sh_offset > 0) {
                 const existing_size = self.sectionSize(@intCast(shndx));
-                const amt = try self.base.file.?.copyRangeAll(
-                    shdr.sh_offset,
-                    self.base.file.?,
-                    new_offset,
-                    existing_size,
-                );
-                if (amt != existing_size) return error.InputOutput;
+                try self.base.copyRangeAll(shdr.sh_offset, new_offset, existing_size);
             }
 
             shdr.sh_offset = new_offset;
@@ -3647,8 +3645,8 @@ fn fileLookup(files: std.MultiArrayList(File.Entry), index: File.Index, zig_obje
 
 pub fn addFileHandle(
     gpa: Allocator,
-    file_handles: *std.ArrayListUnmanaged(File.Handle),
-    handle: fs.File,
+    file_handles: *std.ArrayList(File.Handle),
+    handle: Io.File,
 ) Allocator.Error!File.HandleIndex {
     try file_handles.append(gpa, handle);
     return @intCast(file_handles.items.len - 1);
@@ -4065,10 +4063,10 @@ fn fmtDumpState(self: *Elf, writer: *std.Io.Writer) std.Io.Writer.Error!void {
 }
 
 /// Caller owns the memory.
-pub fn preadAllAlloc(allocator: Allocator, handle: fs.File, offset: u64, size: u64) ![]u8 {
+pub fn preadAllAlloc(allocator: Allocator, io: Io, io_file: Io.File, offset: u64, size: u64) ![]u8 {
     const buffer = try allocator.alloc(u8, math.cast(usize, size) orelse return error.Overflow);
     errdefer allocator.free(buffer);
-    const amt = try handle.preadAll(buffer, offset);
+    const amt = try io_file.readPositionalAll(io, buffer, offset);
     if (amt != size) return error.InputOutput;
     return buffer;
 }
@@ -4204,8 +4202,8 @@ pub const Ref = struct {
 };
 
 pub const SymbolResolver = struct {
-    keys: std.ArrayListUnmanaged(Key) = .empty,
-    values: std.ArrayListUnmanaged(Ref) = .empty,
+    keys: std.ArrayList(Key) = .empty,
+    values: std.ArrayList(Ref) = .empty,
     table: std.AutoArrayHashMapUnmanaged(void, void) = .empty,
 
     const Result = struct {
@@ -4303,7 +4301,7 @@ const Section = struct {
     /// List of atoms contributing to this section.
     /// TODO currently this is only used for relocations tracking in relocatable mode
     /// but will be merged with atom_list_2.
-    atom_list: std.ArrayListUnmanaged(Ref) = .empty,
+    atom_list: std.ArrayList(Ref) = .empty,
 
     /// List of atoms contributing to this section.
     /// This can be used by sections that require special handling such as init/fini array, etc.
@@ -4327,7 +4325,7 @@ const Section = struct {
     /// overcapacity can be negative. A simple way to have negative overcapacity is to
     /// allocate a fresh text block, which will have ideal capacity, and then grow it
     /// by 1 byte. It will then have -1 overcapacity.
-    free_list: std.ArrayListUnmanaged(Ref) = .empty,
+    free_list: std.ArrayList(Ref) = .empty,
 };
 
 pub fn sectionSize(self: *Elf, shndx: u32) u64 {
@@ -4434,16 +4432,17 @@ pub fn stringTableLookup(strtab: []const u8, off: u32) [:0]const u8 {
 
 pub fn pwriteAll(elf_file: *Elf, bytes: []const u8, offset: u64) error{LinkFailure}!void {
     const comp = elf_file.base.comp;
+    const io = comp.io;
     const diags = &comp.link_diags;
-    elf_file.base.file.?.pwriteAll(bytes, offset) catch |err| {
-        return diags.fail("failed to write: {s}", .{@errorName(err)});
-    };
+    elf_file.base.file.?.writePositionalAll(io, bytes, offset) catch |err|
+        return diags.fail("failed to write: {t}", .{err});
 }
 
-pub fn setEndPos(elf_file: *Elf, length: u64) error{LinkFailure}!void {
+pub fn setLength(elf_file: *Elf, length: u64) error{LinkFailure}!void {
     const comp = elf_file.base.comp;
+    const io = comp.i;
     const diags = &comp.link_diags;
-    elf_file.base.file.?.setEndPos(length) catch |err| {
+    elf_file.base.file.?.setLength(io, length) catch |err| {
         return diags.fail("failed to set file end pos: {s}", .{@errorName(err)});
     };
 }
@@ -4457,6 +4456,7 @@ pub fn cast(elf_file: *Elf, comptime T: type, x: anytype) error{LinkFailure}!T {
 }
 
 const std = @import("std");
+const Io = std.Io;
 const build_options = @import("build_options");
 const builtin = @import("builtin");
 const assert = std.debug.assert;

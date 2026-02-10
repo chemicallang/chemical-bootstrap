@@ -41,7 +41,7 @@ pub fn syscall_fork() u64 {
         \\ 2:
         : [ret] "={o0}" (-> u64),
         : [number] "{g1}" (@intFromEnum(SYS.fork)),
-        : .{ .memory = true, .icc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
+        : .{ .memory = true, .xcc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
 }
 
 pub fn syscall0(number: SYS) u64 {
@@ -53,7 +53,7 @@ pub fn syscall0(number: SYS) u64 {
         \\ 1:
         : [ret] "={o0}" (-> u64),
         : [number] "{g1}" (@intFromEnum(number)),
-        : .{ .memory = true, .icc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
+        : .{ .memory = true, .xcc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
 }
 
 pub fn syscall1(number: SYS, arg1: u64) u64 {
@@ -66,7 +66,7 @@ pub fn syscall1(number: SYS, arg1: u64) u64 {
         : [ret] "={o0}" (-> u64),
         : [number] "{g1}" (@intFromEnum(number)),
           [arg1] "{o0}" (arg1),
-        : .{ .memory = true, .icc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
+        : .{ .memory = true, .xcc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
 }
 
 pub fn syscall2(number: SYS, arg1: u64, arg2: u64) u64 {
@@ -80,7 +80,7 @@ pub fn syscall2(number: SYS, arg1: u64, arg2: u64) u64 {
         : [number] "{g1}" (@intFromEnum(number)),
           [arg1] "{o0}" (arg1),
           [arg2] "{o1}" (arg2),
-        : .{ .memory = true, .icc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
+        : .{ .memory = true, .xcc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
 }
 
 pub fn syscall3(number: SYS, arg1: u64, arg2: u64, arg3: u64) u64 {
@@ -95,7 +95,7 @@ pub fn syscall3(number: SYS, arg1: u64, arg2: u64, arg3: u64) u64 {
           [arg1] "{o0}" (arg1),
           [arg2] "{o1}" (arg2),
           [arg3] "{o2}" (arg3),
-        : .{ .memory = true, .icc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
+        : .{ .memory = true, .xcc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
 }
 
 pub fn syscall4(number: SYS, arg1: u64, arg2: u64, arg3: u64, arg4: u64) u64 {
@@ -111,7 +111,7 @@ pub fn syscall4(number: SYS, arg1: u64, arg2: u64, arg3: u64, arg4: u64) u64 {
           [arg2] "{o1}" (arg2),
           [arg3] "{o2}" (arg3),
           [arg4] "{o3}" (arg4),
-        : .{ .memory = true, .icc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
+        : .{ .memory = true, .xcc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
 }
 
 pub fn syscall5(number: SYS, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) u64 {
@@ -128,7 +128,7 @@ pub fn syscall5(number: SYS, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u
           [arg3] "{o2}" (arg3),
           [arg4] "{o3}" (arg4),
           [arg5] "{o4}" (arg5),
-        : .{ .memory = true, .icc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
+        : .{ .memory = true, .xcc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
 }
 
 pub fn syscall6(
@@ -154,7 +154,7 @@ pub fn syscall6(
           [arg4] "{o3}" (arg4),
           [arg5] "{o4}" (arg5),
           [arg6] "{o5}" (arg6),
-        : .{ .memory = true, .icc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
+        : .{ .memory = true, .xcc = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
 }
 
 pub fn clone() callconv(.naked) u64 {
@@ -220,7 +220,7 @@ pub fn restore_rt() callconv(.c) void {
     return asm volatile ("t 0x6d"
         :
         : [number] "{g1}" (@intFromEnum(SYS.rt_sigreturn)),
-        : .{ .memory = true, .icc = true, .o0 = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
+        : .{ .memory = true, .xcc = true, .o0 = true, .o1 = true, .o2 = true, .o3 = true, .o4 = true, .o5 = true, .o7 = true });
 }
 
 pub const VDSO = struct {
@@ -228,46 +228,4 @@ pub const VDSO = struct {
     pub const CGT_VER = "LINUX_2.6";
 };
 
-pub const off_t = i64;
-pub const ino_t = u64;
 pub const time_t = i64;
-pub const mode_t = u32;
-pub const dev_t = u64;
-pub const nlink_t = u32;
-pub const blksize_t = i64;
-pub const blkcnt_t = i64;
-
-// The `stat64` definition used by the kernel.
-pub const Stat = extern struct {
-    dev: dev_t,
-    ino: ino_t,
-    nlink: nlink_t,
-    _pad: i32,
-
-    mode: mode_t,
-    uid: std.os.linux.uid_t,
-    gid: std.os.linux.gid_t,
-    __pad0: u32,
-
-    rdev: dev_t,
-    size: i64,
-    blksize: blksize_t,
-    blocks: blkcnt_t,
-
-    atim: std.os.linux.timespec,
-    mtim: std.os.linux.timespec,
-    ctim: std.os.linux.timespec,
-    __unused: [3]u64,
-
-    pub fn atime(self: @This()) std.os.linux.timespec {
-        return self.atim;
-    }
-
-    pub fn mtime(self: @This()) std.os.linux.timespec {
-        return self.mtim;
-    }
-
-    pub fn ctime(self: @This()) std.os.linux.timespec {
-        return self.ctim;
-    }
-};

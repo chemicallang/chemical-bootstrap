@@ -11,7 +11,7 @@ to find and inspect the patch diffs.
  * LLVM, LLD, Clang 21.1.0
  * zlib 1.3.1
  * zstd 1.5.2
- * zig 0.16.0-dev.1354+94e98bfe8
+ * zig 0.16.0-dev.2287+eb3f16db5
 
 For other versions, check the git tags of this repository.
 
@@ -19,14 +19,16 @@ For other versions, check the git tags of this repository.
 
  * all: Deleted unused files.
  * LLVM: Support .lib extension for static zstd.
- * LLVM: Portable handling of .def linker flag
  * LLVM: Don't pass -static when building executables.
+ * LLVM: OpenBSD `llvm-config` logic
  * Clang: Ignore the examples directory
  * Clang: Disable building of libclang-cpp.so.
  * Clang: remove `nvptx-arch` and `amdgpu-arch` symlinks
+ * Clang: remove broken scan-build manpage install logic
  * LLD: Added additional include directory to Zig's libunwind.
  * LLD: Respect `LLD_BUILD_TOOLS=OFF`
  * LLD: Skip building docs
+ * LLD: OpenBSD `findMajMinShlib()` logic
  * zlib: Delete the ability to build a shared library.
 
 ## Host System Dependencies
@@ -200,6 +202,21 @@ is more portable across Linux distributions.
 | `sparc64-netbsd-none`    | [#231](https://codeberg.org/ziglang/zig-bootstrap/issues/231) |
 | `x86-netbsd-none`        | OK     |
 | `x86_64-netbsd-none`     | OK     |
+
+#### OpenBSD
+
+| Target                    | Status |
+|---------------------------|--------|
+| `aarch64-openbsd-none`    | OK     |
+| `arm-openbsd-eabi`        | OK     |
+| `mips64-openbsd-none`     | OK     |
+| `mips64el-openbsd-none`   | OK     |
+| `powerpc-openbsd-eabihf`  | OK     |
+| `powerpc64-openbsd-none`  | OK     |
+| `riscv64-openbsd-none`    | OK     |
+| `sparc64-openbsd-none`    | [#251](https://codeberg.org/ziglang/zig-bootstrap/issues/251) |
+| `x86-openbsd-none`        | OK     |
+| `x86_64-openbsd-none`     | OK     |
 
 #### Windows
 

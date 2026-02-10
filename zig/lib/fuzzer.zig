@@ -1,32 +1,36 @@
 const builtin = @import("builtin");
+const native_endian = builtin.cpu.arch.endian();
+
 const std = @import("std");
+const Io = std.Io;
 const fatal = std.process.fatal;
 const mem = std.mem;
 const math = std.math;
-const Allocator = mem.Allocator;
+const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const panic = std.debug.panic;
 const abi = std.Build.abi.fuzz;
-const native_endian = builtin.cpu.arch.endian();
 
 pub const std_options = std.Options{
     .logFn = logOverride,
 };
 
+const io = std.Io.Threaded.global_single_threaded.ioBasic();
+
 fn logOverride(
     comptime level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
     const f = log_f orelse
         panic("attempt to use log before initialization, message:\n" ++ format, args);
-    f.lock(.exclusive) catch |e| panic("failed to lock logging file: {t}", .{e});
-    defer f.unlock();
+    f.lock(io, .exclusive) catch |e| panic("failed to lock logging file: {t}", .{e});
+    defer f.unlock(io);
 
     var buf: [256]u8 = undefined;
-    var fw = f.writer(&buf);
-    const end = f.getEndPos() catch |e| panic("failed to get fuzzer log file end: {t}", .{e});
+    var fw = f.writer(io, &buf);
+    const end = f.length(io) catch |e| panic("failed to get fuzzer log file end: {t}", .{e});
     fw.seekTo(end) catch |e| panic("failed to seek to fuzzer log file end: {t}", .{e});
 
     const prefix1 = comptime level.asText();
@@ -45,7 +49,7 @@ const gpa = switch (builtin.mode) {
 };
 
 /// Part of `exec`, however seperate to allow it to be set before `exec` is.
-var log_f: ?std.fs.File = null;
+var log_f: ?Io.File = null;
 var exec: Executable = .preinit;
 var inst: Instrumentation = .preinit;
 var fuzzer: Fuzzer = undefined;
@@ -59,7 +63,7 @@ const Executable = struct {
     /// Tracks the hit count for each pc as updated by the process's instrumentation.
     pc_counters: []u8,
 
-    cache_f: std.fs.Dir,
+    cache_f: Io.Dir,
     /// Shared copy of all pcs that have been hit stored in a memory-mapped file that can viewed
     /// while the fuzzer is running.
     shared_seen_pcs: MemoryMappedList,
@@ -76,16 +80,16 @@ const Executable = struct {
         .pc_digest = undefined,
     };
 
-    fn getCoverageFile(cache_dir: std.fs.Dir, pcs: []const usize, pc_digest: u64) MemoryMappedList {
+    fn getCoverageFile(cache_dir: Io.Dir, pcs: []const usize, pc_digest: u64) MemoryMappedList {
         const pc_bitset_usizes = bitsetUsizes(pcs.len);
         const coverage_file_name = std.fmt.hex(pc_digest);
         comptime assert(abi.SeenPcsHeader.trailing[0] == .pc_bits_usize);
         comptime assert(abi.SeenPcsHeader.trailing[1] == .pc_addr);
 
-        var v = cache_dir.makeOpenPath("v", .{}) catch |e|
+        var v = cache_dir.createDirPathOpen(io, "v", .{}) catch |e|
             panic("failed to create directory 'v': {t}", .{e});
-        defer v.close();
-        const coverage_file, const populate = if (v.createFile(&coverage_file_name, .{
+        defer v.close(io);
+        const coverage_file, const populate = if (v.createFile(io, &coverage_file_name, .{
             .read = true,
             // If we create the file, we want to block other processes while we populate it
             .lock = .exclusive,
@@ -93,7 +97,7 @@ const Executable = struct {
         })) |f|
             .{ f, true }
         else |e| switch (e) {
-            error.PathAlreadyExists => .{ v.openFile(&coverage_file_name, .{
+            error.PathAlreadyExists => .{ v.openFile(io, &coverage_file_name, .{
                 .mode = .read_write,
                 .lock = .shared,
             }) catch |e2| panic(
@@ -108,7 +112,7 @@ const Executable = struct {
             pcs.len * @sizeOf(usize);
 
         if (populate) {
-            defer coverage_file.lock(.shared) catch |e| panic(
+            defer coverage_file.lock(io, .shared) catch |e| panic(
                 "failed to demote lock for coverage file '{s}': {t}",
                 .{ &coverage_file_name, e },
             );
@@ -116,19 +120,22 @@ const Executable = struct {
                 "failed to init memory map for coverage file '{s}': {t}",
                 .{ &coverage_file_name, e },
             );
-            map.appendSliceAssumeCapacity(mem.asBytes(&abi.SeenPcsHeader{
+            map.appendSliceAssumeCapacity(@ptrCast(&abi.SeenPcsHeader{
                 .n_runs = 0,
                 .unique_runs = 0,
                 .pcs_len = pcs.len,
             }));
             map.appendNTimesAssumeCapacity(0, pc_bitset_usizes * @sizeOf(usize));
-            map.appendSliceAssumeCapacity(mem.sliceAsBytes(pcs));
+            // Relocations have been applied to `pcs` so it contains runtime addresses (with slide
+            // applied). We need to translate these to the virtual addresses as on disk.
+            for (pcs) |pc| {
+                const pc_vaddr = fuzzer_unslide_address(pc);
+                map.appendSliceAssumeCapacity(@ptrCast(&pc_vaddr));
+            }
             return map;
         } else {
-            const size = coverage_file.getEndPos() catch |e| panic(
-                "failed to stat coverage file '{s}': {t}",
-                .{ &coverage_file_name, e },
-            );
+            const size = coverage_file.length(io) catch |e|
+                panic("failed to stat coverage file '{s}': {t}", .{ &coverage_file_name, e });
             if (size != coverage_file_len) panic(
                 "incompatible existing coverage file '{s}' (differing lengths: {} != {})",
                 .{ &coverage_file_name, size, coverage_file_len },
@@ -160,13 +167,11 @@ const Executable = struct {
     pub fn init(cache_dir_path: []const u8) Executable {
         var self: Executable = undefined;
 
-        const cache_dir = std.fs.cwd().makeOpenPath(cache_dir_path, .{}) catch |e| panic(
-            "failed to open directory '{s}': {t}",
-            .{ cache_dir_path, e },
-        );
-        log_f = cache_dir.createFile("tmp/libfuzzer.log", .{ .truncate = false }) catch |e|
+        const cache_dir = Io.Dir.cwd().createDirPathOpen(io, cache_dir_path, .{}) catch |e|
+            panic("failed to open directory '{s}': {t}", .{ cache_dir_path, e });
+        log_f = cache_dir.createFile(io, "tmp/libfuzzer.log", .{ .truncate = false }) catch |e|
             panic("failed to create file 'tmp/libfuzzer.log': {t}", .{e});
-        self.cache_f = cache_dir.makeOpenPath("f", .{}) catch |e|
+        self.cache_f = cache_dir.createDirPathOpen(io, "f", .{}) catch |e|
             panic("failed to open directory 'f': {t}", .{e});
 
         // Linkers are expected to automatically add symbols prefixed with these for the start and
@@ -215,7 +220,16 @@ const Executable = struct {
             .{ self.pc_counters.len, pcs.len },
         );
 
-        self.pc_digest = std.hash.Wyhash.hash(0, mem.sliceAsBytes(pcs));
+        self.pc_digest = digest: {
+            // Relocations have been applied to `pcs` so it contains runtime addresses (with slide
+            // applied). We need to translate these to the virtual addresses as on disk.
+            var h: std.hash.Wyhash = .init(0);
+            for (pcs) |pc| {
+                const pc_vaddr = fuzzer_unslide_address(pc);
+                h.update(@ptrCast(&pc_vaddr));
+            }
+            break :digest h.final();
+        };
         self.shared_seen_pcs = getCoverageFile(cache_dir, pcs, self.pc_digest);
 
         return self;
@@ -266,10 +280,10 @@ const Instrumentation = struct {
     /// Values that have been constant operands in comparisons and switch cases.
     /// There may be duplicates in this array if they came from different addresses, which is
     /// fine as they are likely more important and hence more likely to be selected.
-    const_vals2: std.ArrayListUnmanaged(u16) = .empty,
-    const_vals4: std.ArrayListUnmanaged(u32) = .empty,
-    const_vals8: std.ArrayListUnmanaged(u64) = .empty,
-    const_vals16: std.ArrayListUnmanaged(u128) = .empty,
+    const_vals2: std.ArrayList(u16) = .empty,
+    const_vals4: std.ArrayList(u32) = .empty,
+    const_vals8: std.ArrayList(u64) = .empty,
+    const_vals16: std.ArrayList(u128) = .empty,
 
     /// A minimal state for this struct which instrumentation can function on.
     /// Used before this structure is initialized to avoid illegal behavior
@@ -370,14 +384,14 @@ const Fuzzer = struct {
     /// Minimized past inputs leading to new pc hits.
     /// These are randomly mutated in round-robin fashion
     /// Element zero is always an empty input. It is gauraunteed no other elements are empty.
-    corpus: std.ArrayListUnmanaged([]const u8),
+    corpus: std.ArrayList([]const u8),
     corpus_pos: usize,
     /// List of past mutations that have led to new inputs. This way, the mutations that are the
     /// most effective are the most likely to be selected again. Starts with one of each mutation.
-    mutations: std.ArrayListUnmanaged(Mutation) = .empty,
+    mutations: std.ArrayList(Mutation) = .empty,
 
     /// Filesystem directory containing found inputs for future runs
-    corpus_dir: std.fs.Dir,
+    corpus_dir: Io.Dir,
     corpus_dir_idx: usize = 0,
 
     pub fn init(test_one: abi.TestOne, unit_test_name: []const u8) Fuzzer {
@@ -391,10 +405,10 @@ const Fuzzer = struct {
         };
         const arena = self.arena_ctx.allocator();
 
-        self.corpus_dir = exec.cache_f.makeOpenPath(unit_test_name, .{}) catch |e|
+        self.corpus_dir = exec.cache_f.createDirPathOpen(io, unit_test_name, .{}) catch |e|
             panic("failed to open directory '{s}': {t}", .{ unit_test_name, e });
         self.input = in: {
-            const f = self.corpus_dir.createFile("in", .{
+            const f = self.corpus_dir.createFile(io, "in", .{
                 .read = true,
                 .truncate = false,
                 // In case any other fuzz tests are running under the same test name,
@@ -405,7 +419,7 @@ const Fuzzer = struct {
                 error.WouldBlock => @panic("input file 'in' is in use by another fuzzing process"),
                 else => panic("failed to create input file 'in': {t}", .{e}),
             };
-            const size = f.getEndPos() catch |e| panic("failed to stat input file 'in': {t}", .{e});
+            const size = f.length(io) catch |e| panic("failed to stat input file 'in': {t}", .{e});
             const map = (if (size < std.heap.page_size_max)
                 MemoryMappedList.create(f, 8, std.heap.page_size_max)
             else
@@ -431,6 +445,7 @@ const Fuzzer = struct {
         while (true) {
             var name_buf: [@sizeOf(usize) * 2]u8 = undefined;
             const bytes = self.corpus_dir.readFileAlloc(
+                io,
                 std.fmt.bufPrint(&name_buf, "{x}", .{self.corpus_dir_idx}) catch unreachable,
                 arena,
                 .unlimited,
@@ -452,7 +467,7 @@ const Fuzzer = struct {
         self.input.deinit();
         self.corpus.deinit(gpa);
         self.mutations.deinit(gpa);
-        self.corpus_dir.close();
+        self.corpus_dir.close(io);
         self.arena_ctx.deinit();
         self.* = undefined;
     }
@@ -559,17 +574,10 @@ const Fuzzer = struct {
 
             // Write new corpus to cache
             var name_buf: [@sizeOf(usize) * 2]u8 = undefined;
-            self.corpus_dir.writeFile(.{
-                .sub_path = std.fmt.bufPrint(
-                    &name_buf,
-                    "{x}",
-                    .{self.corpus_dir_idx},
-                ) catch unreachable,
+            self.corpus_dir.writeFile(io, .{
+                .sub_path = std.fmt.bufPrint(&name_buf, "{x}", .{self.corpus_dir_idx}) catch unreachable,
                 .data = bytes,
-            }) catch |e| panic(
-                "failed to write corpus file '{x}': {t}",
-                .{ self.corpus_dir_idx, e },
-            );
+            }) catch |e| panic("failed to write corpus file '{x}': {t}", .{ self.corpus_dir_idx, e });
             self.corpus_dir_idx += 1;
         }
     }
@@ -620,6 +628,14 @@ export fn fuzzer_main(limit_kind: abi.LimitKind, amount: u64) void {
         .forever => while (true) fuzzer.cycle(),
         .iterations => for (0..amount) |_| fuzzer.cycle(),
     }
+}
+
+export fn fuzzer_unslide_address(addr: usize) usize {
+    const si = std.debug.getSelfDebugInfo() catch @compileError("unsupported");
+    const slide = si.getModuleSlide(std.debug.getDebugInfoAllocator(), addr) catch |err| {
+        std.debug.panic("failed to find virtual address slide: {t}", .{err});
+    };
+    return addr - slide;
 }
 
 /// Helps determine run uniqueness in the face of recursion.
@@ -1185,13 +1201,13 @@ const Mutation = enum {
                         const j = rng.uintAtMostBiased(usize, corpus[splice_i].len - len);
                         out.appendSliceAssumeCapacity(corpus[splice_i][j..][0..len]);
                     },
-                    .@"const" => out.appendSliceAssumeCapacity(mem.asBytes(
+                    .@"const" => out.appendSliceAssumeCapacity(@ptrCast(
                         &data_ctx[rng.uintLessThanBiased(usize, data_ctx.len)],
                     )),
-                    .small => out.appendSliceAssumeCapacity(mem.asBytes(
+                    .small => out.appendSliceAssumeCapacity(@ptrCast(
                         &mem.nativeTo(data_ctx[0], rng.int(SmallValue), data_ctx[1]),
                     )),
-                    .few => out.appendSliceAssumeCapacity(mem.asBytes(
+                    .few => out.appendSliceAssumeCapacity(@ptrCast(
                         &fewValue(rng, data_ctx[0], data_ctx[1]),
                     )),
                 }
@@ -1286,7 +1302,7 @@ const Mutation = enum {
     }
 };
 
-/// Like `std.ArrayListUnmanaged(u8)` but backed by memory mapping.
+/// Like `std.ArrayList(u8)` but backed by memory mapping.
 pub const MemoryMappedList = struct {
     /// Contents of the list.
     ///
@@ -1298,13 +1314,13 @@ pub const MemoryMappedList = struct {
     /// How many bytes this list can hold without allocating additional memory.
     capacity: usize,
     /// The file is kept open so that it can be resized.
-    file: std.fs.File,
+    file: Io.File,
 
-    pub fn init(file: std.fs.File, length: usize, capacity: usize) !MemoryMappedList {
+    pub fn init(file: Io.File, length: usize, capacity: usize) !MemoryMappedList {
         const ptr = try std.posix.mmap(
             null,
             capacity,
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .READ = true, .WRITE = true },
             .{ .TYPE = .SHARED },
             file.handle,
             0,
@@ -1316,13 +1332,13 @@ pub const MemoryMappedList = struct {
         };
     }
 
-    pub fn create(file: std.fs.File, length: usize, capacity: usize) !MemoryMappedList {
-        try file.setEndPos(capacity);
+    pub fn create(file: Io.File, length: usize, capacity: usize) !MemoryMappedList {
+        try file.setLength(io, capacity);
         return init(file, length, capacity);
     }
 
     pub fn deinit(l: *MemoryMappedList) void {
-        l.file.close();
+        l.file.close(io);
         std.posix.munmap(@volatileCast(l.items.ptr[0..l.capacity]));
         l.* = undefined;
     }
@@ -1347,7 +1363,7 @@ pub const MemoryMappedList = struct {
         if (l.capacity >= new_capacity) return;
 
         std.posix.munmap(@volatileCast(l.items.ptr[0..l.capacity]));
-        try l.file.setEndPos(new_capacity);
+        try l.file.setLength(io, new_capacity);
         l.* = try init(l.file, l.items.len, new_capacity);
     }
 

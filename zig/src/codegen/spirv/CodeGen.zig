@@ -83,7 +83,7 @@ const ControlFlow = union(enum) {
             selection: struct {
                 /// In order to know which merges we still need to do, we need to keep
                 /// a stack of those.
-                merge_stack: std.ArrayListUnmanaged(SelectionMerge) = .empty,
+                merge_stack: std.ArrayList(SelectionMerge) = .empty,
             },
             /// For a `loop` type block, we can early-exit the block by
             /// jumping to the loop exit node, and we don't need to generate
@@ -91,7 +91,7 @@ const ControlFlow = union(enum) {
             loop: struct {
                 /// The next block to jump to can be determined from any number
                 /// of conditions that jump to the loop exit.
-                merges: std.ArrayListUnmanaged(Incoming) = .empty,
+                merges: std.ArrayList(Incoming) = .empty,
                 /// The label id of the loop's merge block.
                 merge_block: Id,
             },
@@ -105,7 +105,7 @@ const ControlFlow = union(enum) {
             }
         };
         /// This determines how exits from the current block must be handled.
-        block_stack: std.ArrayListUnmanaged(*Structured.Block) = .empty,
+        block_stack: std.ArrayList(*Structured.Block) = .empty,
         block_results: std.AutoHashMapUnmanaged(Air.Inst.Index, Id) = .empty,
     };
 
@@ -117,7 +117,7 @@ const ControlFlow = union(enum) {
 
         const Block = struct {
             label: ?Id = null,
-            incoming_blocks: std.ArrayListUnmanaged(Incoming) = .empty,
+            incoming_blocks: std.ArrayList(Incoming) = .empty,
         };
 
         /// We need to keep track of result ids for block labels, as well as the 'incoming'
@@ -151,9 +151,9 @@ control_flow: ControlFlow,
 base_line: u32,
 block_label: Id = .none,
 next_arg_index: u32 = 0,
-args: std.ArrayListUnmanaged(Id) = .empty,
+args: std.ArrayList(Id) = .empty,
 inst_results: std.AutoHashMapUnmanaged(Air.Inst.Index, Id) = .empty,
-id_scratch: std.ArrayListUnmanaged(Id) = .empty,
+id_scratch: std.ArrayList(Id) = .empty,
 prologue: Section = .{},
 body: Section = .{},
 error_msg: ?*Zcu.ErrorMsg = null,
@@ -254,7 +254,7 @@ pub fn genNav(cg: *CodeGen, do_codegen: bool) Error!void {
             try cg.module.debugName(func_result_id, nav.fqn.toSlice(ip));
         },
         .global => {
-            assert(ip.indexToKey(val.toIntern()) == .@"extern");
+            const key = ip.indexToKey(val.toIntern()).@"extern";
 
             const storage_class = cg.module.storageClass(nav.getAddrspace());
             assert(storage_class != .generic); // These should be instance globals
@@ -277,14 +277,32 @@ pub fn genNav(cg: *CodeGen, do_codegen: bool) Error!void {
                         }
                     }
 
-                    switch (ip.indexToKey(ty.toIntern())) {
-                        .func_type, .opaque_type => {},
-                        else => {
-                            try cg.module.decorate(ptr_ty_id, .{
-                                .array_stride = .{ .array_stride = @intCast(ty.abiSize(zcu)) },
+                    try cg.module.decorate(ptr_ty_id, .{
+                        .array_stride = .{ .array_stride = @intCast(ty.abiSize(zcu)) },
+                    });
+
+                    if (key.decoration) |decoration| switch (decoration) {
+                        .location => |location| {
+                            if (storage_class != .output and storage_class != .input and storage_class != .uniform_constant) {
+                                return cg.fail("storage class must be one of (output, input, uniform_constant) but is {s}", .{@tagName(storage_class)});
+                            }
+                            try cg.module.decorate(result_id, .{
+                                .location = .{ .location = location },
                             });
                         },
-                    }
+                        .descriptor => |descriptor| {
+                            if (storage_class != .storage_buffer and storage_class != .uniform and storage_class != .uniform_constant) {
+                                return cg.fail("storage class must be one of (storage_buffer, uniform, uniform_constant) but is {s}", .{@tagName(storage_class)});
+                            }
+                            try cg.module.decorate(result_id, .{
+                                .binding = .{ .binding_point = descriptor.binding },
+                            });
+
+                            try cg.module.decorate(result_id, .{
+                                .descriptor_set = .{ .descriptor_set = descriptor.set },
+                            });
+                        },
+                    };
                 },
                 else => {},
             }
@@ -2270,6 +2288,9 @@ fn buildWideMul(
 ) !struct { Temporary, Temporary } {
     const pt = cg.pt;
     const zcu = cg.module.zcu;
+    const comp = zcu.comp;
+    const gpa = comp.gpa;
+    const io = comp.io;
     const target = cg.module.zcu.getTarget();
     const ip = &zcu.intern_pool;
 
@@ -2297,14 +2318,14 @@ fn buildWideMul(
             };
 
             for (0..ops) |i| {
-                try cg.body.emit(cg.module.gpa, .OpIMul, .{
+                try cg.body.emit(gpa, .OpIMul, .{
                     .id_result_type = arith_op_ty_id,
                     .id_result = value_results.at(i),
                     .operand_1 = lhs_op.at(i),
                     .operand_2 = rhs_op.at(i),
                 });
 
-                try cg.body.emit(cg.module.gpa, .OpExtInst, .{
+                try cg.body.emit(gpa, .OpExtInst, .{
                     .id_result_type = arith_op_ty_id,
                     .id_result = overflow_results.at(i),
                     .set = set,
@@ -2316,7 +2337,7 @@ fn buildWideMul(
         .vulkan, .opengl => {
             // Operations return a struct{T, T}
             // where T is maybe vectorized.
-            const op_result_ty: Type = .fromInterned(try ip.getTupleType(zcu.gpa, pt.tid, .{
+            const op_result_ty: Type = .fromInterned(try ip.getTupleType(gpa, io, pt.tid, .{
                 .types = &.{ arith_op_ty.toIntern(), arith_op_ty.toIntern() },
                 .values = &.{ .none, .none },
             }));
@@ -2330,7 +2351,7 @@ fn buildWideMul(
             for (0..ops) |i| {
                 const op_result = cg.module.allocId();
 
-                try cg.body.emitRaw(cg.module.gpa, opcode, 4);
+                try cg.body.emitRaw(gpa, opcode, 4);
                 cg.body.writeOperand(Id, op_result_ty_id);
                 cg.body.writeOperand(Id, op_result);
                 cg.body.writeOperand(Id, lhs_op.at(i));
@@ -2340,14 +2361,14 @@ fn buildWideMul(
                 // Temporary to deal with the fact that these are structs eventually,
                 // but for now, take the struct apart and return two separate vectors.
 
-                try cg.body.emit(cg.module.gpa, .OpCompositeExtract, .{
+                try cg.body.emit(gpa, .OpCompositeExtract, .{
                     .id_result_type = arith_op_ty_id,
                     .id_result = value_results.at(i),
                     .composite = op_result,
                     .indexes = &.{0},
                 });
 
-                try cg.body.emit(cg.module.gpa, .OpCompositeExtract, .{
+                try cg.body.emit(gpa, .OpCompositeExtract, .{
                     .id_result_type = arith_op_ty_id,
                     .id_result = overflow_results.at(i),
                     .composite = op_result,
@@ -5783,7 +5804,7 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index) !void {
         }
     }
 
-    var incoming_structured_blocks: std.ArrayListUnmanaged(ControlFlow.Structured.Block.Incoming) = .empty;
+    var incoming_structured_blocks: std.ArrayList(ControlFlow.Structured.Block.Incoming) = .empty;
     defer incoming_structured_blocks.deinit(gpa);
 
     if (cg.control_flow == .structured) {

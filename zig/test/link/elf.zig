@@ -5,6 +5,9 @@ pub fn testAll(b: *Build, build_opts: BuildOptions) *Step {
     // https://github.com/ziglang/zig/issues/25323
     if (builtin.os.tag == .freebsd) return elf_step;
 
+    // https://github.com/ziglang/zig/issues/25961
+    if (comptime builtin.cpu.arch.endian() == .big) return elf_step;
+
     const default_target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64, // TODO relax this once ELF linker is able to handle other archs
         .os_tag = .linux,
@@ -1320,7 +1323,7 @@ fn testGcSectionsZig(b: *Build, opts: Options) *Step {
             \\extern var live_var2: i32;
             \\extern fn live_fn2() void;
             \\pub fn main() void {
-            \\    var stdout_writer = std.fs.File.stdout().writerStreaming(&.{});
+            \\    var stdout_writer = std.Io.File.stdout().writerStreaming(std.Options.debug_io, &.{});
             \\    stdout_writer.interface.print("{d} {d}\n", .{ live_var1, live_var2 }) catch @panic("fail");
             \\    live_fn2();
             \\}
@@ -1362,7 +1365,7 @@ fn testGcSectionsZig(b: *Build, opts: Options) *Step {
             \\extern var live_var2: i32;
             \\extern fn live_fn2() void;
             \\pub fn main() void {
-            \\    var stdout_writer = std.fs.File.stdout().writerStreaming(&.{});
+            \\    var stdout_writer = std.Io.File.stdout().writerStreaming(std.Options.debug_io, &.{});
             \\    stdout_writer.interface.print("{d} {d}\n", .{ live_var1, live_var2 }) catch @panic("fail");
             \\    live_fn2();
             \\}

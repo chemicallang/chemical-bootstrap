@@ -1,5 +1,5 @@
 mutex: std.Thread.Mutex,
-modules: std.ArrayListUnmanaged(Module),
+modules: std.ArrayList(Module),
 module_name_arena: std.heap.ArenaAllocator.State,
 
 pub const init: SelfInfo = .{
@@ -32,6 +32,12 @@ pub fn getModuleName(si: *SelfInfo, gpa: Allocator, address: usize) Error![]cons
     defer si.mutex.unlock();
     const module = try si.findModule(gpa, address);
     return module.name;
+}
+pub fn getModuleSlide(si: *SelfInfo, gpa: Allocator, address: usize) Error!usize {
+    si.mutex.lock();
+    defer si.mutex.unlock();
+    const module = try si.findModule(gpa, address);
+    return module.base_address;
 }
 
 pub const can_unwind: bool = switch (builtin.cpu.arch) {
@@ -143,15 +149,16 @@ pub const UnwindContext = struct {
         return ctx.cur.getRegs().bp;
     }
 };
-pub fn unwindFrame(si: *SelfInfo, gpa: Allocator, context: *UnwindContext) Error!usize {
+pub fn unwindFrame(si: *SelfInfo, gpa: Allocator, io: Io, context: *UnwindContext) Error!usize {
     _ = si;
+    _ = io;
     _ = gpa;
 
     const current_regs = context.cur.getRegs();
-    var image_base: windows.DWORD64 = undefined;
+    var image_base: usize = undefined;
     if (windows.ntdll.RtlLookupFunctionEntry(current_regs.ip, &image_base, &context.history_table)) |runtime_function| {
         var handler_data: ?*anyopaque = null;
-        var establisher_frame: u64 = undefined;
+        var establisher_frame: usize = undefined;
         _ = windows.ntdll.RtlVirtualUnwind(
             windows.UNW_FLAG_NHANDLER,
             image_base,
@@ -198,14 +205,14 @@ const Module = struct {
         coff_section_headers: []coff.SectionHeader,
 
         const MappedFile = struct {
-            file: fs.File,
+            file: Io.File,
             section_handle: windows.HANDLE,
             section_view: []const u8,
-            fn deinit(mf: *const MappedFile) void {
+            fn deinit(mf: *const MappedFile, io: Io) void {
                 const process_handle = windows.GetCurrentProcess();
                 assert(windows.ntdll.NtUnmapViewOfSection(process_handle, @constCast(mf.section_view.ptr)) == .SUCCESS);
                 windows.CloseHandle(mf.section_handle);
-                mf.file.close();
+                mf.file.close(io);
             }
         };
 
@@ -216,7 +223,7 @@ const Module = struct {
                 pdb.file_reader.file.close(io);
                 pdb.deinit();
             }
-            if (di.mapped_file) |*mf| mf.deinit();
+            if (di.mapped_file) |*mf| mf.deinit(io);
 
             var arena = di.arena.promote(gpa);
             arena.deinit();
@@ -308,8 +315,7 @@ const Module = struct {
             );
             if (len == 0) return error.MissingDebugInfo;
             const name_w = name_buffer[0 .. len + 4 :0];
-            var threaded: Io.Threaded = .init_single_threaded;
-            const coff_file = threaded.dirOpenFileWtf16(null, name_w, .{}) catch |err| switch (err) {
+            const coff_file = Io.Threaded.dirOpenFileWtf16(null, name_w, .{}) catch |err| switch (err) {
                 error.Canceled => |e| return e,
                 error.Unexpected => |e| return e,
                 error.FileNotFound => return error.MissingDebugInfo,
@@ -325,7 +331,6 @@ const Module = struct {
                 error.SystemResources,
                 error.WouldBlock,
                 error.AccessDenied,
-                error.ProcessNotFound,
                 error.PermissionDenied,
                 error.NoSpaceLeft,
                 error.DeviceBusy,
@@ -337,7 +342,7 @@ const Module = struct {
                 error.AntivirusInterference,
                 error.ProcessFdQuotaExceeded,
                 error.SystemFdQuotaExceeded,
-                error.FileLocksNotSupported,
+                error.FileLocksUnsupported,
                 error.FileBusy,
                 => return error.ReadFailed,
             };
@@ -345,13 +350,19 @@ const Module = struct {
             var section_handle: windows.HANDLE = undefined;
             const create_section_rc = windows.ntdll.NtCreateSection(
                 &section_handle,
-                windows.STANDARD_RIGHTS_REQUIRED | windows.SECTION_QUERY | windows.SECTION_MAP_READ,
+                .{
+                    .SPECIFIC = .{ .SECTION = .{
+                        .QUERY = true,
+                        .MAP_READ = true,
+                    } },
+                    .STANDARD = .{ .RIGHTS = .REQUIRED },
+                },
                 null,
                 null,
-                windows.PAGE_READONLY,
+                .{ .READONLY = true },
                 // The documentation states that if no AllocationAttribute is specified, then SEC_COMMIT is the default.
                 // In practice, this isn't the case and specifying 0 will result in INVALID_PARAMETER_6.
-                windows.SEC_COMMIT,
+                .{ .COMMIT = true },
                 coff_file.handle,
             );
             if (create_section_rc != .SUCCESS) return error.MissingDebugInfo;
@@ -366,21 +377,21 @@ const Module = struct {
                 0,
                 null,
                 &coff_len,
-                .ViewUnmap,
-                0,
-                windows.PAGE_READONLY,
+                .Unmap,
+                .{},
+                .{ .READONLY = true },
             );
             if (map_section_rc != .SUCCESS) return error.MissingDebugInfo;
             errdefer assert(windows.ntdll.NtUnmapViewOfSection(process_handle, @constCast(section_view_ptr.?)) == .SUCCESS);
             const section_view = section_view_ptr.?[0..coff_len];
             coff_obj = coff.Coff.init(section_view, false) catch return error.InvalidDebugInfo;
             break :mapped .{
-                .file = .adaptFromNewApi(coff_file),
+                .file = coff_file,
                 .section_handle = section_handle,
                 .section_view = section_view,
             };
         };
-        errdefer if (mapped_file) |*mf| mf.deinit();
+        errdefer if (mapped_file) |*mf| mf.deinit(io);
 
         const coff_image_base = coff_obj.getImageBase();
 
@@ -420,22 +431,22 @@ const Module = struct {
                 break :pdb null;
             };
             const pdb_file_open_result = if (fs.path.isAbsolute(path)) res: {
-                break :res std.fs.cwd().openFile(path, .{});
+                break :res Io.Dir.cwd().openFile(io, path, .{});
             } else res: {
-                const self_dir = fs.selfExeDirPathAlloc(gpa) catch |err| switch (err) {
+                const self_dir = std.process.executableDirPathAlloc(io, gpa) catch |err| switch (err) {
                     error.OutOfMemory, error.Unexpected => |e| return e,
                     else => return error.ReadFailed,
                 };
                 defer gpa.free(self_dir);
                 const abs_path = try fs.path.join(gpa, &.{ self_dir, path });
                 defer gpa.free(abs_path);
-                break :res std.fs.cwd().openFile(abs_path, .{});
+                break :res Io.Dir.cwd().openFile(io, abs_path, .{});
             };
             const pdb_file = pdb_file_open_result catch |err| switch (err) {
                 error.FileNotFound, error.IsDir => break :pdb null,
                 else => return error.ReadFailed,
             };
-            errdefer pdb_file.close();
+            errdefer pdb_file.close(io);
 
             const pdb_reader = try arena.create(Io.File.Reader);
             pdb_reader.* = pdb_file.reader(io, try arena.alloc(u8, 4096));

@@ -1,3 +1,16 @@
+const MappedFile = @This();
+
+const builtin = @import("builtin");
+const is_linux = builtin.os.tag == .linux;
+const is_windows = builtin.os.tag == .windows;
+
+const std = @import("std");
+const Io = std.Io;
+const assert = std.debug.assert;
+const linux = std.os.linux;
+const windows = std.os.windows;
+
+io: Io,
 file: std.Io.File,
 flags: packed struct {
     block_size: std.mem.Alignment,
@@ -16,16 +29,22 @@ writers: std.SinglyLinkedList,
 
 pub const growth_factor = 4;
 
-pub const Error = std.posix.MMapError || std.posix.MRemapError || std.fs.File.SetEndPosError || error{
+pub const Error = std.posix.MMapError || std.posix.MRemapError || Io.File.LengthError || error{
     NotFile,
     SystemResources,
     IsDir,
     Unseekable,
     NoSpaceLeft,
+
+    InputOutput,
+    FileTooBig,
+    FileBusy,
+    NonResizable,
 };
 
-pub fn init(file: std.Io.File, gpa: std.mem.Allocator) !MappedFile {
+pub fn init(file: std.Io.File, gpa: std.mem.Allocator, io: Io) !MappedFile {
     var mf: MappedFile = .{
+        .io = io,
         .file = file,
         .flags = undefined,
         .section = if (is_windows) windows.INVALID_HANDLE_VALUE else {},
@@ -53,6 +72,43 @@ pub fn init(file: std.Io.File, gpa: std.mem.Allocator) !MappedFile {
                     else => std.heap.page_size_max,
                 },
             };
+        }
+        if (is_linux) {
+            const use_c = std.c.versionCheck(if (builtin.abi.isAndroid())
+                .{ .major = 30, .minor = 0, .patch = 0 }
+            else
+                .{ .major = 2, .minor = 28, .patch = 0 });
+            const sys = if (use_c) std.c else std.os.linux;
+            while (true) {
+                var statx = std.mem.zeroes(linux.Statx);
+                const rc = sys.statx(
+                    mf.file.handle,
+                    "",
+                    std.posix.AT.EMPTY_PATH,
+                    .{ .TYPE = true, .SIZE = true, .BLOCKS = true },
+                    &statx,
+                );
+                switch (sys.errno(rc)) {
+                    .SUCCESS => {
+                        assert(statx.mask.TYPE);
+                        assert(statx.mask.SIZE);
+                        assert(statx.mask.BLOCKS);
+                        if (!std.posix.S.ISREG(statx.mode)) return error.PathAlreadyExists;
+                        break :stat .{ statx.size, @max(std.heap.pageSize(), statx.blksize) };
+                    },
+                    .INTR => continue,
+                    .ACCES => return error.AccessDenied,
+                    .BADF => if (std.debug.runtime_safety) unreachable else return error.Unexpected,
+                    .FAULT => if (std.debug.runtime_safety) unreachable else return error.Unexpected,
+                    .INVAL => if (std.debug.runtime_safety) unreachable else return error.Unexpected,
+                    .LOOP => return error.SymLinkLoop,
+                    .NAMETOOLONG => return error.NameTooLong,
+                    .NOENT => return error.FileNotFound,
+                    .NOTDIR => return error.FileNotFound,
+                    .NOMEM => return error.SystemResources,
+                    else => |err| return std.posix.unexpectedErrno(err),
+                }
+            }
         }
         const stat = try std.posix.fstat(mf.file.handle);
         if (!std.posix.S.ISREG(stat.mode)) return error.PathAlreadyExists;
@@ -108,10 +164,7 @@ pub const Node = extern struct {
         has_content: bool,
         /// Whether a moved event on this node bubbles down to children.
         bubbles_moved: bool,
-        unused: @Type(.{ .int = .{
-            .signedness = .unsigned,
-            .bits = 32 - @bitSizeOf(std.mem.Alignment) - 6,
-        } }) = 0,
+        unused: @Int(.unsigned, 32 - @bitSizeOf(std.mem.Alignment) - 6) = 0,
     };
 
     pub const Location = union(enum(u1)) {
@@ -122,19 +175,14 @@ pub const Node = extern struct {
         },
         large: extern struct {
             index: usize,
-            unused: @Type(.{ .int = .{
-                .signedness = .unsigned,
-                .bits = 64 - @bitSizeOf(usize),
-            } }) = 0,
+            unused: @Int(.unsigned, 64 - @bitSizeOf(usize)) = 0,
         },
 
         pub const Tag = @typeInfo(Location).@"union".tag_type.?;
-        pub const Payload = @Type(.{ .@"union" = .{
-            .layout = .@"extern",
-            .tag_type = null,
-            .fields = @typeInfo(Location).@"union".fields,
-            .decls = &.{},
-        } });
+        pub const Payload = extern union {
+            small: @FieldType(Location, "small"),
+            large: @FieldType(Location, "large"),
+        };
 
         pub fn resolve(loc: Location, mf: *const MappedFile) [2]u64 {
             return switch (loc) {
@@ -213,7 +261,7 @@ pub const Node = extern struct {
             defer node_moved.* = false;
             return node_moved.*;
         }
-        fn movedAssumeCapacity(ni: Node.Index, mf: *MappedFile) void {
+        pub fn movedAssumeCapacity(ni: Node.Index, mf: *MappedFile) void {
             if (ni.hasMoved(mf)) return;
             const node = ni.get(mf);
             node.flags.moved = true;
@@ -234,7 +282,7 @@ pub const Node = extern struct {
             defer node_resized.* = false;
             return node_resized.*;
         }
-        fn resizedAssumeCapacity(ni: Node.Index, mf: *MappedFile) void {
+        pub fn resizedAssumeCapacity(ni: Node.Index, mf: *MappedFile) void {
             const node = ni.get(mf);
             if (node.flags.resized) return;
             node.flags.resized = true;
@@ -427,8 +475,8 @@ pub const Node = extern struct {
                     return n;
                 },
                 .streaming,
-                .streaming_reading,
-                .positional_reading,
+                .streaming_simple,
+                .positional_simple,
                 .failure,
                 => {
                     const dest = limit.slice(interface.unusedCapacitySlice());
@@ -606,13 +654,14 @@ pub fn addNodeAfter(
 }
 
 fn resizeNode(mf: *MappedFile, gpa: std.mem.Allocator, ni: Node.Index, requested_size: u64) !void {
+    const io = mf.io;
     const node = ni.get(mf);
     const old_offset, const old_size = node.location().resolve(mf);
     const new_size = node.flags.alignment.forward(@intCast(requested_size));
     // Resize the entire file
     if (ni == Node.Index.root) {
         try mf.ensureCapacityForSetLocation(gpa);
-        try std.fs.File.adaptFromNewApi(mf.file).setEndPos(new_size);
+        try mf.file.setLength(io, new_size);
         try mf.ensureTotalCapacity(@intCast(new_size));
         ni.setLocationAssumeCapacity(mf, old_offset, new_size);
         return;
@@ -645,7 +694,7 @@ fn resizeNode(mf: *MappedFile, gpa: std.mem.Allocator, ni: Node.Index, requested
             @intCast(requested_size +| requested_size / growth_factor),
         ) - old_size;
         _, const file_size = Node.Index.root.location(mf).resolve(mf);
-        while (true) switch (linux.E.init(switch (std.math.order(range_file_offset, file_size)) {
+        while (true) switch (linux.errno(switch (std.math.order(range_file_offset, file_size)) {
             .lt => linux.fallocate(
                 mf.file.handle,
                 linux.FALLOC.FL_INSERT_RANGE,
@@ -858,7 +907,7 @@ fn moveRange(mf: *MappedFile, old_file_offset: u64, new_file_offset: u64, size: 
     // delete the copy of this node at the old location
     if (is_linux and !mf.flags.fallocate_punch_hole_unsupported and
         size >= mf.flags.block_size.toByteUnits() * 2 - 1) while (true)
-        switch (linux.E.init(linux.fallocate(
+        switch (linux.errno(linux.fallocate(
             mf.file.handle,
             linux.FALLOC.FL_PUNCH_HOLE | linux.FALLOC.FL_KEEP_SIZE,
             @intCast(old_file_offset),
@@ -910,7 +959,7 @@ fn copyFileRange(
                 @intCast(remaining_size),
                 0,
             );
-            switch (linux.E.init(copy_len)) {
+            switch (linux.errno(copy_len)) {
                 .SUCCESS => {
                     if (copy_len == 0) break;
                     remaining_size -= copy_len;
@@ -961,12 +1010,19 @@ pub fn ensureTotalCapacityPrecise(mf: *MappedFile, new_capacity: usize) !void {
     if (is_windows) {
         if (mf.section == windows.INVALID_HANDLE_VALUE) switch (windows.ntdll.NtCreateSection(
             &mf.section,
-            windows.STANDARD_RIGHTS_REQUIRED | windows.SECTION_QUERY |
-                windows.SECTION_MAP_WRITE | windows.SECTION_MAP_READ | windows.SECTION_EXTEND_SIZE,
+            .{
+                .SPECIFIC = .{ .SECTION = .{
+                    .QUERY = true,
+                    .MAP_WRITE = true,
+                    .MAP_READ = true,
+                    .EXTEND_SIZE = true,
+                } },
+                .STANDARD = .{ .RIGHTS = .REQUIRED },
+            },
             null,
             @constCast(&@as(i64, @intCast(aligned_capacity))),
-            windows.PAGE_READWRITE,
-            windows.SEC_COMMIT,
+            .{ .READWRITE = true },
+            .{ .COMMIT = true },
             mf.file.handle,
         )) {
             .SUCCESS => {},
@@ -982,9 +1038,9 @@ pub fn ensureTotalCapacityPrecise(mf: *MappedFile, new_capacity: usize) !void {
             0,
             null,
             &contents_len,
-            .ViewUnmap,
-            0,
-            windows.PAGE_READWRITE,
+            .Unmap,
+            .{},
+            .{ .READWRITE = true },
         )) {
             .SUCCESS => mf.contents = contents_ptr.?[0..contents_len],
             else => return error.MemoryMappingNotSupported,
@@ -992,7 +1048,7 @@ pub fn ensureTotalCapacityPrecise(mf: *MappedFile, new_capacity: usize) !void {
     } else mf.contents = try std.posix.mmap(
         null,
         aligned_capacity,
-        std.posix.PROT.READ | std.posix.PROT.WRITE,
+        .{ .READ = true, .WRITE = true },
         .{ .TYPE = if (is_linux) .SHARED_VALIDATE else .SHARED },
         mf.file.handle,
         0,
@@ -1046,12 +1102,3 @@ fn verifyNode(mf: *MappedFile, parent_ni: Node.Index) void {
         ni = node.next;
     }
 }
-
-const assert = std.debug.assert;
-const builtin = @import("builtin");
-const is_linux = builtin.os.tag == .linux;
-const is_windows = builtin.os.tag == .windows;
-const linux = std.os.linux;
-const MappedFile = @This();
-const std = @import("std");
-const windows = std.os.windows;

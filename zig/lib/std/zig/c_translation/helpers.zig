@@ -81,23 +81,15 @@ fn ToUnsigned(comptime T: type) type {
 }
 
 /// Constructs a [*c] pointer with the const and volatile annotations
-/// from SelfType for pointing to a C flexible array of ElementType.
-pub fn FlexibleArrayType(comptime SelfType: type, comptime ElementType: type) type {
-    switch (@typeInfo(SelfType)) {
-        .pointer => |ptr| {
-            return @Type(.{ .pointer = .{
-                .size = .c,
-                .is_const = ptr.is_const,
-                .is_volatile = ptr.is_volatile,
-                .alignment = @alignOf(ElementType),
-                .address_space = .generic,
-                .child = ElementType,
-                .is_allowzero = true,
-                .sentinel_ptr = null,
-            } });
-        },
-        else => |info| @compileError("Invalid self type \"" ++ @tagName(info) ++ "\" for flexible array getter: " ++ @typeName(SelfType)),
-    }
+/// from Self for pointing to a C flexible array of Element.
+pub fn FlexibleArrayType(comptime Self: type, comptime Element: type) type {
+    return switch (@typeInfo(Self)) {
+        .pointer => |ptr| @Pointer(.c, .{
+            .@"const" = ptr.is_const,
+            .@"volatile" = ptr.is_volatile,
+        }, Element, null),
+        else => |info| @compileError("Invalid self type \"" ++ @tagName(info) ++ "\" for flexible array getter: " ++ @typeName(Self)),
+    };
 }
 
 /// Promote the type of an integer literal until it fits as C would.
@@ -123,7 +115,7 @@ fn PromoteIntLiteralReturnType(comptime SuffixType: type, comptime number: compt
     else
         &signed_oct_hex;
 
-    var pos = std.mem.indexOfScalar(type, list, SuffixType).?;
+    var pos = std.mem.findScalar(type, list, SuffixType).?;
     while (pos < list.len) : (pos += 1) {
         if (number >= std.math.minInt(list[pos]) and number <= std.math.maxInt(list[pos])) {
             return list[pos];
@@ -219,7 +211,7 @@ fn castInt(comptime DestType: type, target: anytype) DestType {
     const dest = @typeInfo(DestType).int;
     const source = @typeInfo(@TypeOf(target)).int;
 
-    const Int = @Type(.{ .int = .{ .bits = dest.bits, .signedness = source.signedness } });
+    const Int = @Int(source.signedness, dest.bits);
 
     if (dest.bits < source.bits)
         return @as(DestType, @bitCast(@as(Int, @truncate(target))))

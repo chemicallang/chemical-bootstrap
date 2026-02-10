@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 data: []const u8,
@@ -11,10 +12,9 @@ pub fn deinit(self: *const Assembly, gpa: Allocator) void {
     gpa.free(self.text);
 }
 
-pub fn writeToFile(self: Assembly, file: std.fs.File) !void {
-    var vec: [2]std.posix.iovec_const = .{
-        .{ .base = self.data.ptr, .len = self.data.len },
-        .{ .base = self.text.ptr, .len = self.text.len },
-    };
-    return file.writevAll(&vec);
+pub fn writeToFile(self: Assembly, io: Io, file: Io.File) !void {
+    var file_writer = file.writer(io, &.{});
+
+    var buffers = [_][]const u8{ self.data, self.text };
+    try file_writer.interface.writeSplatAll(&buffers, 1);
 }

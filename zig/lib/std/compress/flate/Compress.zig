@@ -598,7 +598,7 @@ fn testFuzzedMatchLen(_: void, input: []const u8) !void {
     const bytes = w.buffered()[bytes_off..];
     old = @min(old, bytes.len - 1, token.max_length - 1);
 
-    const diff_index = mem.indexOfDiff(u8, prev, bytes).?; // unwrap since lengths are not same
+    const diff_index = mem.findDiff(u8, prev, bytes).?; // unwrap since lengths are not same
     const expected_len = @min(diff_index, 258);
     errdefer std.debug.print(
         \\prev : '{any}'
@@ -993,14 +993,15 @@ const huffman = struct {
     const max_leafs = 286;
     const max_nodes = max_leafs * 2;
 
-    const Node = struct {
-        freq: u16,
+    const Node = packed struct(u32) {
         depth: u16,
+        freq: u16,
 
         pub const Index = u16;
 
+        /// `freq` is more significant than `depth`
         pub fn smaller(a: Node, b: Node) bool {
-            return if (a.freq != b.freq) a.freq < b.freq else a.depth < b.depth;
+            return @as(u32, @bitCast(a)) < @as(u32, @bitCast(b));
         }
     };
 

@@ -48,7 +48,7 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
     const arena = b.allocator;
     const fmt: *Fmt = @fieldParentPtr("step", step);
 
-    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    var argv: std.ArrayList([]const u8) = .empty;
     try argv.ensureUnusedCapacity(arena, 2 + 1 + fmt.paths.len + 2 * fmt.exclude_paths.len);
 
     argv.appendAssumeCapacity(b.graph.zig_exe);
@@ -69,7 +69,7 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
 
     const run_result = try step.captureChildProcess(options.gpa, prog_node, argv.items);
     if (fmt.check) switch (run_result.term) {
-        .Exited => |code| if (code != 0 and run_result.stdout.len != 0) {
+        .exited => |code| if (code != 0 and run_result.stdout.len != 0) {
             var it = std.mem.tokenizeScalar(u8, run_result.stdout, '\n');
             while (it.next()) |bad_file_name| {
                 try step.addError("{s}: non-conforming formatting", .{bad_file_name});

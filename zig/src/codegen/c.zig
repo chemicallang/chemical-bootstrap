@@ -431,7 +431,7 @@ pub const Function = struct {
     lazy_fns: LazyFnMap,
     func_index: InternPool.Index,
     /// All the locals, to be emitted at the top of the function.
-    locals: std.ArrayListUnmanaged(Local) = .empty,
+    locals: std.ArrayList(Local) = .empty,
     /// Which locals are available for reuse, based on Type.
     free_locals_map: LocalsMap = .{},
     /// Locals which will not be freed by Liveness. This is used after a
@@ -752,7 +752,7 @@ pub const DeclGen = struct {
     fwd_decl: Writer.Allocating,
     error_msg: ?*Zcu.ErrorMsg,
     ctype_pool: CType.Pool,
-    scratch: std.ArrayListUnmanaged(u32),
+    scratch: std.ArrayList(u32),
     /// This map contains all the UAVs we saw generating this function.
     /// `link.C` will merge them into its `uavs`/`aligned_uavs` fields.
     /// Key is the value of the UAV; value is the UAV's alignment, or
@@ -5084,16 +5084,32 @@ fn bitcast(f: *Function, dest_ty: Type, operand: CValue, operand_ty: Type) !CVal
     } else operand;
 
     const local = try f.allocLocal(null, dest_ty);
-    try w.writeAll("memcpy(&");
-    try f.writeCValue(w, local, .Other);
-    try w.writeAll(", &");
-    try f.writeCValue(w, operand_lval, .Other);
-    try w.writeAll(", sizeof(");
-    try f.renderType(
-        w,
-        if (dest_ty.abiSize(zcu) <= operand_ty.abiSize(zcu)) dest_ty else operand_ty,
-    );
-    try w.writeAll("));");
+    // On big-endian targets, copying ABI integers with padding bits is awkward, because the padding bits are at the low bytes of the value.
+    // We need to offset the source or destination pointer appropriately and copy the right number of bytes.
+    if (target.cpu.arch.endian() == .big and dest_ty.isAbiInt(zcu) and !operand_ty.isAbiInt(zcu)) {
+        // e.g. [10]u8 -> u80. We need to offset the destination so that we copy to the least significant bits of the integer.
+        const offset = dest_ty.abiSize(zcu) - operand_ty.abiSize(zcu);
+        try w.writeAll("memcpy((char *)&");
+        try f.writeCValue(w, local, .Other);
+        try w.print(" + {d}, &", .{offset});
+        try f.writeCValue(w, operand_lval, .Other);
+        try w.print(", {d});", .{operand_ty.abiSize(zcu)});
+    } else if (target.cpu.arch.endian() == .big and operand_ty.isAbiInt(zcu) and !dest_ty.isAbiInt(zcu)) {
+        // e.g. u80 -> [10]u8. We need to offset the source so that we copy from the least significant bits of the integer.
+        const offset = operand_ty.abiSize(zcu) - dest_ty.abiSize(zcu);
+        try w.writeAll("memcpy(&");
+        try f.writeCValue(w, local, .Other);
+        try w.writeAll(", (const char *)&");
+        try f.writeCValue(w, operand_lval, .Other);
+        try w.print(" + {d}, {d});", .{ offset, dest_ty.abiSize(zcu) });
+    } else {
+        try w.writeAll("memcpy(&");
+        try f.writeCValue(w, local, .Other);
+        try w.writeAll(", &");
+        try f.writeCValue(w, operand_lval, .Other);
+        try w.print(", {d});", .{@min(dest_ty.abiSize(zcu), operand_ty.abiSize(zcu))});
+    }
+
     try f.object.newline();
 
     // Ensure padding bits have the expected value.
@@ -5513,7 +5529,9 @@ fn airAsm(f: *Function, inst: Air.Inst.Index) !CValue {
                     .alignas = CType.AlignAs.fromAbiAlignment(input_ty.abiAlignment(zcu)),
                 });
                 try f.allocs.put(gpa, input_local.new_local, false);
-                try f.object.dg.renderTypeAndName(w, input_ty, input_local, Const, .none, .complete);
+                // Do not render the declaration as `const` qualified if we're generating an
+                // explicit `register` local, as GCC will ignore the constraint completely.
+                try f.object.dg.renderTypeAndName(w, input_ty, input_local, if (is_reg) .{} else Const, .none, .complete);
                 if (is_reg) {
                     try w.writeAll(" __asm(\"");
                     try w.writeAll(constraint["{".len .. constraint.len - "}".len]);
@@ -5656,6 +5674,10 @@ fn airAsm(f: *Function, inst: Air.Inst.Index) !CValue {
                             c_name_buf[0] = '$';
                             @memcpy((&c_name_buf)[1..][0..field_name.len], field_name);
                             break :name (&c_name_buf)[0 .. 1 + field_name.len];
+                        } else if (target.cpu.arch.isSPARC() and
+                        (mem.eql(u8, field_name, "ccr") or mem.eql(u8, field_name, "icc") or mem.eql(u8, field_name, "xcc"))) name: {
+                            // C compilers just use `icc` to encompass all of these.
+                            break :name "icc";
                         } else field_name;
 
                     try w.print(" {f}", .{fmtStringLiteral(name, null)});

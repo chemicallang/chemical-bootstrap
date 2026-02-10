@@ -46,23 +46,16 @@ pub const SrcHasher = std.crypto.hash.Blake3;
 pub const SrcHash = [16]u8;
 
 pub const Color = enum {
-    /// Determine whether stderr is a terminal or not automatically.
+    /// Auto-detect whether stream supports terminal colors.
     auto,
-    /// Assume stderr is not a terminal.
+    /// Force-enable colors.
     off,
-    /// Assume stderr is a terminal.
+    /// Suppress colors.
     on,
 
-    pub fn getTtyConf(color: Color, detected: Io.tty.Config) Io.tty.Config {
+    pub fn terminalMode(color: Color) ?Io.Terminal.Mode {
         return switch (color) {
-            .auto => detected,
-            .on => .escape_codes,
-            .off => .no_color,
-        };
-    }
-    pub fn detectTtyConf(color: Color) Io.tty.Config {
-        return switch (color) {
-            .auto => .detect(.stderr()),
+            .auto => null,
             .on => .escape_codes,
             .off => .no_color,
         };
@@ -639,7 +632,7 @@ pub fn readSourceFileToEndAlloc(gpa: Allocator, file_reader: *Io.File.Reader) ![
     return buffer.toOwnedSliceSentinel(gpa, 0);
 }
 
-pub fn printAstErrorsToStderr(gpa: Allocator, tree: Ast, path: []const u8, color: Color) !void {
+pub fn printAstErrorsToStderr(gpa: Allocator, io: Io, tree: Ast, path: []const u8, color: Color) !void {
     var wip_errors: std.zig.ErrorBundle.Wip = undefined;
     try wip_errors.init(gpa);
     defer wip_errors.deinit();
@@ -648,7 +641,7 @@ pub fn printAstErrorsToStderr(gpa: Allocator, tree: Ast, path: []const u8, color
 
     var error_bundle = try wip_errors.toOwnedBundle("");
     defer error_bundle.deinit(gpa);
-    error_bundle.renderToStdErr(.{}, color);
+    return error_bundle.renderToStderr(io, .{}, color);
 }
 
 pub fn putAstErrorsIntoBundle(
@@ -746,34 +739,45 @@ pub const EnvVar = enum {
     ZIG_VERBOSE_CC,
     ZIG_BTRFS_WORKAROUND,
     ZIG_DEBUG_CMD,
+    ZIG_IS_DETECTING_LIBC_PATHS,
+    ZIG_IS_TRYING_TO_NOT_CALL_ITSELF,
+
+    // C toolchain integration
+    NIX_CFLAGS_COMPILE,
+    NIX_CFLAGS_LINK,
+    NIX_LDFLAGS,
+    C_INCLUDE_PATH,
+    CPLUS_INCLUDE_PATH,
+    LIBRARY_PATH,
     CC,
+
+    // Terminal integration
     NO_COLOR,
     CLICOLOR_FORCE,
+
+    // Debug info integration
     XDG_CACHE_HOME,
+    LOCALAPPDATA,
     HOME,
 
-    pub fn isSet(comptime ev: EnvVar) bool {
-        return std.process.hasNonEmptyEnvVarConstant(@tagName(ev));
+    // Windows SDK integration
+    PROGRAMDATA,
+
+    // Homebrew integration
+    HOMEBREW_PREFIX,
+
+    pub fn isSet(ev: EnvVar, map: *const std.process.Environ.Map) bool {
+        return map.contains(@tagName(ev));
     }
 
-    pub fn get(ev: EnvVar, arena: std.mem.Allocator) !?[]u8 {
-        if (std.process.getEnvVarOwned(arena, @tagName(ev))) |value| {
-            return value;
-        } else |err| switch (err) {
-            error.EnvironmentVariableNotFound => return null,
-            else => |e| return e,
-        }
-    }
-
-    pub fn getPosix(comptime ev: EnvVar) ?[:0]const u8 {
-        return std.posix.getenvZ(@tagName(ev));
+    pub fn get(ev: EnvVar, map: *const std.process.Environ.Map) ?[]const u8 {
+        return map.get(@tagName(ev));
     }
 };
 
 pub const SimpleComptimeReason = enum(u32) {
     // Evaluating at comptime because a builtin operand must be comptime-known.
     // These messages all mention a specific builtin.
-    operand_Type,
     operand_setEvalBranchQuota,
     operand_setFloatMode,
     operand_branchHint,
@@ -809,25 +813,34 @@ pub const SimpleComptimeReason = enum(u32) {
     // Evaluating at comptime because types must be comptime-known.
     // Reasons other than `.type` are just more specific messages.
     type,
+    int_signedness,
+    int_bit_width,
     array_sentinel,
+    array_length,
+    pointer_size,
+    pointer_attrs,
     pointer_sentinel,
     slice_sentinel,
-    array_length,
     vector_length,
-    error_set_contents,
-    struct_fields,
-    enum_fields,
-    union_fields,
-    function_ret_ty,
-    function_parameters,
+    fn_ret_ty,
+    fn_param_types,
+    fn_param_attrs,
+    fn_attrs,
+    struct_layout,
+    struct_field_names,
+    struct_field_types,
+    struct_field_attrs,
+    union_layout,
+    union_field_names,
+    union_field_types,
+    union_field_attrs,
+    tuple_field_types,
+    enum_field_names,
+    enum_field_values,
 
     // Evaluating at comptime because decl/field name must be comptime-known.
     decl_name,
     field_name,
-    struct_field_name,
-    enum_field_name,
-    union_field_name,
-    tuple_field_name,
     tuple_field_index,
 
     // Evaluating at comptime because it is an attribute of a global declaration.
@@ -856,7 +869,6 @@ pub const SimpleComptimeReason = enum(u32) {
     pub fn message(r: SimpleComptimeReason) []const u8 {
         return switch (r) {
             // zig fmt: off
-            .operand_Type                => "operand to '@Type' must be comptime-known",
             .operand_setEvalBranchQuota  => "operand to '@setEvalBranchQuota' must be comptime-known",
             .operand_setFloatMode        => "operand to '@setFloatMode' must be comptime-known",
             .operand_branchHint          => "operand to '@branchHint' must be comptime-known",
@@ -888,24 +900,33 @@ pub const SimpleComptimeReason = enum(u32) {
             .clobber              => "clobber must be comptime-known",
 
             .type                => "types must be comptime-known",
+            .int_signedness      => "integer signedness must be comptime-known",
+            .int_bit_width       => "integer bit width must be comptime-known",
             .array_sentinel      => "array sentinel value must be comptime-known",
+            .array_length        => "array length must be comptime-known",
+            .pointer_size        => "pointer size must be comptime-known",
+            .pointer_attrs       => "pointer attributes must be comptime-known",
             .pointer_sentinel    => "pointer sentinel value must be comptime-known",
             .slice_sentinel      => "slice sentinel value must be comptime-known",
-            .array_length        => "array length must be comptime-known",
             .vector_length       => "vector length must be comptime-known",
-            .error_set_contents  => "error set contents must be comptime-known",
-            .struct_fields       => "struct fields must be comptime-known",
-            .enum_fields         => "enum fields must be comptime-known",
-            .union_fields        => "union fields must be comptime-known",
-            .function_ret_ty     => "function return type must be comptime-known",
-            .function_parameters => "function parameters must be comptime-known",
+            .fn_ret_ty           => "function return type must be comptime-known",
+            .fn_param_types      => "function parameter types must be comptime-known",
+            .fn_param_attrs      => "function parameter attributes must be comptime-known",
+            .fn_attrs            => "function attributes must be comptime-known",
+            .struct_layout       => "struct layout must be comptime-known",
+            .struct_field_names  => "struct field names must be comptime-known",
+            .struct_field_types  => "struct field types must be comptime-known",
+            .struct_field_attrs  => "struct field attributes must be comptime-known",
+            .union_layout        => "union layout must be comptime-known",
+            .union_field_names   => "union field names must be comptime-known",
+            .union_field_types   => "union field types must be comptime-known",
+            .union_field_attrs   => "union field attributes must be comptime-known",
+            .tuple_field_types   => "tuple field types must be comptime-known",
+            .enum_field_names    => "enum field names must be comptime-known",
+            .enum_field_values   => "enum field values must be comptime-known",
 
             .decl_name         => "declaration name must be comptime-known",
             .field_name        => "field name must be comptime-known",
-            .struct_field_name => "struct field name must be comptime-known",
-            .enum_field_name   => "enum field name must be comptime-known",
-            .union_field_name  => "union field name must be comptime-known",
-            .tuple_field_name  => "tuple field name must be comptime-known",
             .tuple_field_index => "tuple field index must be comptime-known",
 
             .container_var_init => "initializer of container-level variable must be comptime-known",

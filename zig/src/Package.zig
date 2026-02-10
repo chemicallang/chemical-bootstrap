@@ -14,9 +14,9 @@ pub const Fingerprint = packed struct(u64) {
     id: u32,
     checksum: u32,
 
-    pub fn generate(name: []const u8) Fingerprint {
+    pub fn generate(rng: std.Random, name: []const u8) Fingerprint {
         return .{
-            .id = std.crypto.random.intRangeLessThan(u32, 1, 0xffffffff),
+            .id = rng.intRangeLessThan(u32, 1, 0xffffffff),
             .checksum = std.hash.Crc32.hash(name),
         };
     }
@@ -105,7 +105,7 @@ pub const Hash = struct {
         assert(name.len <= 32);
         assert(ver.len <= 32);
         var result: Hash = undefined;
-        var buf: std.ArrayListUnmanaged(u8) = .initBuffer(&result.bytes);
+        var buf: std.ArrayList(u8) = .initBuffer(&result.bytes);
         buf.appendSliceAssumeCapacity(name);
         buf.appendAssumeCapacity('-');
         buf.appendSliceAssumeCapacity(ver);

@@ -1,3 +1,11 @@
+const LibCDirs = @This();
+const builtin = @import("builtin");
+
+const std = @import("../std.zig");
+const Io = std.Io;
+const LibCInstallation = std.zig.LibCInstallation;
+const Allocator = std.mem.Allocator;
+
 libc_include_dir_list: []const []const u8,
 libc_installation: ?*const LibCInstallation,
 libc_framework_dir_list: []const []const u8,
@@ -14,11 +22,13 @@ pub const DarwinSdkLayout = enum {
 
 pub fn detect(
     arena: Allocator,
+    io: Io,
     zig_lib_dir: []const u8,
     target: *const std.Target,
     is_native_abi: bool,
     link_libc: bool,
     libc_installation: ?*const LibCInstallation,
+    environ_map: *const std.process.Environ.Map,
 ) LibCInstallation.FindError!LibCDirs {
     if (!link_libc) {
         return .{
@@ -38,7 +48,10 @@ pub fn detect(
     // using the system libc installation.
     if (is_native_abi and !target.isMinGW()) {
         const libc = try arena.create(LibCInstallation);
-        libc.* = LibCInstallation.findNative(.{ .allocator = arena, .target = target }) catch |err| switch (err) {
+        libc.* = LibCInstallation.findNative(arena, io, .{
+            .target = target,
+            .environ_map = environ_map,
+        }) catch |err| switch (err) {
             error.CCompilerExitCode,
             error.CCompilerCrashed,
             error.CCompilerCannotFindHeaders,
@@ -75,12 +88,16 @@ pub fn detect(
 
     if (use_system_abi) {
         const libc = try arena.create(LibCInstallation);
-        libc.* = try LibCInstallation.findNative(.{ .allocator = arena, .verbose = true, .target = target });
+        libc.* = try LibCInstallation.findNative(arena, io, .{
+            .verbose = true,
+            .target = target,
+            .environ_map = environ_map,
+        });
         return detectFromInstallation(arena, target, libc);
     }
 
     return .{
-        .libc_include_dir_list = &[0][]u8{},
+        .libc_include_dir_list = &.{},
         .libc_installation = null,
         .libc_framework_dir_list = &.{},
         .sysroot = null,
@@ -154,7 +171,7 @@ pub fn detectFromBuilding(
         const list = try arena.alloc([]const u8, 1);
         list[0] = try std.fmt.allocPrint(
             arena,
-            "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "any-macos-any",
+            "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "any-darwin-any",
             .{zig_lib_dir},
         );
         return .{
@@ -176,6 +193,8 @@ pub fn detectFromBuilding(
         std.zig.target.freebsdArchNameHeaders(target.cpu.arch)
     else if (target.isNetBSDLibC())
         std.zig.target.netbsdArchNameHeaders(target.cpu.arch)
+    else if (target.isOpenBSDLibC())
+        std.zig.target.openbsdArchNameHeaders(target.cpu.arch)
     else
         @tagName(target.cpu.arch);
     const os_name = @tagName(target.os.tag);
@@ -230,6 +249,7 @@ fn libCGenericName(target: *const std.Target) [:0]const u8 {
         .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => return "darwin",
         .freebsd => return "freebsd",
         .netbsd => return "netbsd",
+        .openbsd => return "openbsd",
         else => {},
     }
     switch (target.abi) {
@@ -254,7 +274,6 @@ fn libCGenericName(target: *const std.Target) [:0]const u8 {
         .ohos,
         .ohoseabi,
         => return "musl",
-        .code16,
         .eabi,
         .eabihf,
         .ilp32,
@@ -266,9 +285,3 @@ fn libCGenericName(target: *const std.Target) [:0]const u8 {
         => unreachable,
     }
 }
-
-const LibCDirs = @This();
-const builtin = @import("builtin");
-const std = @import("../std.zig");
-const LibCInstallation = std.zig.LibCInstallation;
-const Allocator = std.mem.Allocator;

@@ -1,9 +1,11 @@
-const std = @import("std");
 const builtin = @import("builtin");
+
+const std = @import("std");
 const fmt = std.fmt;
 const mem = std.mem;
 const Io = std.Io;
 const Thread = std.Thread;
+const Allocator = std.mem.Allocator;
 
 const Vec4 = @Vector(4, u32);
 const Vec8 = @Vector(8, u32);
@@ -685,9 +687,9 @@ const ChunkBatch = struct {
 
         while (chunk_idx < ctx.end_chunk) {
             const remaining = ctx.end_chunk - chunk_idx;
-            const batch_size = @min(remaining, max_simd_degree);
+            const batch_size: usize = @min(remaining, max_simd_degree);
             const offset = chunk_idx * chunk_length;
-            const batch_len = @as(usize, batch_size) * chunk_length;
+            const batch_len = batch_size * chunk_length;
 
             const num_cvs = compressChunksParallel(
                 ctx.input[offset..][0..batch_len],
@@ -723,32 +725,77 @@ fn processParentBatch(ctx: ParentBatchContext) void {
     }
 }
 
+fn processParentBatchSIMD(ctx: ParentBatchContext) void {
+    const num_parents = ctx.end_idx - ctx.start_idx;
+    if (num_parents == 0) return;
+
+    // Convert input CVs to bytes for SIMD processing
+    var input_bytes: [max_simd_degree * 2 * Blake3.digest_length]u8 = undefined;
+    var output_bytes: [max_simd_degree * Blake3.digest_length]u8 = undefined;
+    var parents_array: [max_simd_degree][*]const u8 = undefined;
+
+    var processed: usize = 0;
+    while (processed < num_parents) {
+        const batch_size: usize = @min(num_parents - processed, max_simd_degree);
+
+        // Convert CV pairs to byte blocks for this batch
+        for (0..batch_size) |i| {
+            const pair_idx = ctx.start_idx + processed + i;
+            const left_cv = ctx.input_cvs[pair_idx * 2];
+            const right_cv = ctx.input_cvs[pair_idx * 2 + 1];
+
+            // Write left CV || right CV to form 64-byte parent block
+            for (0..8) |j| {
+                store32(input_bytes[i * 64 + j * 4 ..][0..4], left_cv[j]);
+                store32(input_bytes[i * 64 + 32 + j * 4 ..][0..4], right_cv[j]);
+            }
+            parents_array[i] = input_bytes[i * 64 ..].ptr;
+        }
+
+        hashMany(parents_array[0..batch_size], batch_size, 1, ctx.key, 0, false, ctx.flags.with(.{ .parent = true }), .{}, .{}, output_bytes[0 .. batch_size * Blake3.digest_length]);
+
+        for (0..batch_size) |i| {
+            const output_idx = ctx.start_idx + processed + i;
+            ctx.output_cvs[output_idx] = loadCvWords(output_bytes[i * Blake3.digest_length ..][0..Blake3.digest_length].*);
+        }
+
+        processed += batch_size;
+    }
+}
+
 fn buildMerkleTreeLayerParallel(
     input_cvs: [][8]u32,
     output_cvs: [][8]u32,
     key: [8]u32,
     flags: Flags,
     io: Io,
-) void {
+) Io.Cancelable!void {
     const num_parents = input_cvs.len / 2;
 
-    if (num_parents <= 16) {
-        for (0..num_parents) |i| {
-            const output = parentOutputFromCvs(input_cvs[i * 2], input_cvs[i * 2 + 1], key, flags);
-            output_cvs[i] = output.chainingValue();
-        }
+    // Process sequentially with SIMD for smaller tree layers to avoid thread overhead
+    // Tree layers shrink quickly, so only parallelize the first few large layers
+    if (num_parents <= 1024) {
+        processParentBatchSIMD(ParentBatchContext{
+            .input_cvs = input_cvs,
+            .output_cvs = output_cvs,
+            .start_idx = 0,
+            .end_idx = num_parents,
+            .key = key,
+            .flags = flags,
+        });
         return;
     }
 
     const num_workers = Thread.getCpuCount() catch 1;
     const parents_per_worker = (num_parents + num_workers - 1) / num_workers;
     var group: Io.Group = .init;
+    defer group.cancel(io);
 
     for (0..num_workers) |worker_id| {
         const start_idx = worker_id * parents_per_worker;
         if (start_idx >= num_parents) break;
 
-        group.async(io, processParentBatch, .{ParentBatchContext{
+        group.async(io, processParentBatchSIMD, .{ParentBatchContext{
             .input_cvs = input_cvs,
             .output_cvs = output_cvs,
             .start_idx = start_idx,
@@ -757,7 +804,7 @@ fn buildMerkleTreeLayerParallel(
             .flags = flags,
         }});
     }
-    group.wait(io);
+    try group.await(io);
 }
 
 fn parentOutput(parent_block: []const u8, key: [8]u32, flags: Flags) Output {
@@ -943,7 +990,7 @@ pub const Blake3 = struct {
         d.final(out);
     }
 
-    pub fn hashParallel(b: []const u8, out: []u8, options: Options, allocator: std.mem.Allocator, io: Io) !void {
+    pub fn hashParallel(b: []const u8, out: []u8, options: Options, allocator: Allocator, io: Io) error{ OutOfMemory, Canceled }!void {
         if (b.len < parallel_threshold) {
             return hash(b, out, options);
         }
@@ -964,6 +1011,7 @@ pub const Blake3 = struct {
         const num_workers = thread_count;
         const chunks_per_worker = (num_full_chunks + num_workers - 1) / num_workers;
         var group: Io.Group = .init;
+        defer group.cancel(io);
 
         for (0..num_workers) |worker_id| {
             const start_chunk = worker_id * chunks_per_worker;
@@ -978,7 +1026,7 @@ pub const Blake3 = struct {
                 .flags = flags,
             }});
         }
-        group.wait(io);
+        try group.await(io);
 
         // Build Merkle tree in parallel layers using ping-pong buffers
         const max_intermediate_size = (num_full_chunks + 1) / 2;
@@ -996,7 +1044,7 @@ pub const Blake3 = struct {
             const has_odd = current_level.len % 2 == 1;
             const next_level_size = num_parents + @intFromBool(has_odd);
 
-            buildMerkleTreeLayerParallel(
+            try buildMerkleTreeLayerParallel(
                 current_level[0 .. num_parents * 2],
                 next_level_buf[0..num_parents],
                 key_words,

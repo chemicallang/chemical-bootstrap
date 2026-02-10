@@ -954,6 +954,16 @@ pub const SendFlags = packed struct(u8) {
     _: u3 = 0,
 };
 
+pub const ShutdownHow = enum { recv, send, both };
+
+pub const ShutdownError = error{
+    ConnectionAborted,
+    ConnectionResetByPeer,
+    NetworkDown,
+    SocketUnconnected,
+    SystemResources,
+} || Io.UnexpectedError || Io.Cancelable;
+
 pub const Interface = struct {
     /// Value 0 indicates `none`.
     index: u32,
@@ -1043,7 +1053,11 @@ pub const Socket = struct {
 
     /// Leaves `address` in a valid state.
     pub fn close(s: *const Socket, io: Io) void {
-        io.vtable.netClose(io.userdata, s.handle);
+        io.vtable.netClose(io.userdata, (&s.handle)[0..1]);
+    }
+
+    pub fn closeMany(io: Io, sockets: []const Socket) void {
+        io.vtable.netClose(io.userdata, sockets);
     }
 
     pub const SendError = error{
@@ -1090,7 +1104,8 @@ pub const Socket = struct {
     }
 
     pub fn sendMany(s: *const Socket, io: Io, messages: []OutgoingMessage, flags: SendFlags) SendError!void {
-        return io.vtable.netSend(io.userdata, s.handle, messages, flags);
+        const err, const n = io.vtable.netSend(io.userdata, s.handle, messages, flags);
+        if (n != messages.len) return err.?;
     }
 
     pub const ReceiveError = error{
@@ -1183,7 +1198,11 @@ pub const Stream = struct {
     const max_iovecs_len = 8;
 
     pub fn close(s: *const Stream, io: Io) void {
-        io.vtable.netClose(io.userdata, s.socket.handle);
+        io.vtable.netClose(io.userdata, (&s.socket.handle)[0..1]);
+    }
+
+    pub fn shutdown(s: *const Stream, io: Io, how: ShutdownHow) ShutdownError!void {
+        return io.vtable.netShutdown(io.userdata, s.socket.handle, how);
     }
 
     pub const Reader = struct {
@@ -1255,6 +1274,7 @@ pub const Stream = struct {
         interface: Io.Writer,
         stream: Stream,
         err: ?Error = null,
+        write_file_err: ?WriteFileError = null,
 
         pub const Error = error{
             /// Another TCP Fast Open is already in progress.
@@ -1284,12 +1304,19 @@ pub const Stream = struct {
             SocketNotBound,
         } || Io.UnexpectedError || Io.Cancelable;
 
+        pub const WriteFileError = error{
+            NetworkDown,
+        } || Io.Cancelable || Io.UnexpectedError;
+
         pub fn init(stream: Stream, io: Io, buffer: []u8) Writer {
             return .{
                 .io = io,
                 .stream = stream,
                 .interface = .{
-                    .vtable = &.{ .drain = drain },
+                    .vtable = &.{
+                        .drain = drain,
+                        .sendFile = sendFile,
+                    },
                     .buffer = buffer,
                 },
             };
@@ -1305,6 +1332,13 @@ pub const Stream = struct {
                 return error.WriteFailed;
             };
             return io_w.consume(n);
+        }
+
+        fn sendFile(io_w: *Io.Writer, file_reader: *Io.File.Reader, limit: Io.Limit) Io.Writer.FileError!usize {
+            _ = io_w;
+            _ = file_reader;
+            _ = limit;
+            return error.Unimplemented; // TODO
         }
     };
 
@@ -1333,6 +1367,10 @@ pub const Server = struct {
         /// Not enough free memory. This often means that the memory allocation is limited
         /// by the socket buffer limits, not by the system memory.
         SystemResources,
+        /// Either `listen` was never called, or `shutdown` was called (possibly while
+        /// this call was blocking). This allows `shutdown` to be used as a concurrent
+        /// cancellation mechanism.
+        SocketNotListening,
         /// The network subsystem has failed.
         NetworkDown,
         /// No connection is already queued and ready to be accepted, and

@@ -10,6 +10,7 @@ pub const Options = struct {
     optimize_modes: []const std.builtin.OptimizeMode,
     test_filters: []const []const u8,
     test_target_filters: []const []const u8,
+    skip_wasm: bool,
     max_rss: usize,
 };
 
@@ -41,6 +42,8 @@ pub fn addLibcTestCase(
 }
 
 pub fn addTarget(libc: *const Libc, target: std.Build.ResolvedTarget) void {
+    if (libc.options.skip_wasm and target.query.cpu_arch != null and target.query.cpu_arch.?.isWasm()) return;
+
     if (libc.options.test_target_filters.len > 0) {
         const triple_txt = target.query.zigTriple(libc.b.allocator) catch @panic("OOM");
         for (libc.options.test_target_filters) |filter| {
@@ -57,10 +60,10 @@ pub fn addTarget(libc: *const Libc, target: std.Build.ResolvedTarget) void {
             .link_libc = true,
         });
 
-        var libtest_c_source_files: []const []const u8 = &.{ "print.c", "rand.c", "setrlim.c", "memfill.c", "vmfill.c", "fdfill.c", "utf8.c" };
+        var libtest_c_source_files: []const []const u8 = &.{ "print.c", "rand.c", "mtest.c", "setrlim.c", "memfill.c", "vmfill.c", "fdfill.c", "utf8.c" };
         libtest_mod.addCSourceFiles(.{
             .root = common,
-            .files = libtest_c_source_files[0..if (target.result.isMuslLibC()) 7 else 2],
+            .files = libtest_c_source_files[0..if (target.result.isMuslLibC()) 8 else 3],
             .flags = &.{"-fno-builtin"},
         });
 

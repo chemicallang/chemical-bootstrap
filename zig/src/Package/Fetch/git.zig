@@ -160,7 +160,7 @@ pub const Oid = union(Format) {
 
 pub const Diagnostics = struct {
     allocator: Allocator,
-    errors: std.ArrayListUnmanaged(Error) = .empty,
+    errors: std.ArrayList(Error) = .empty,
 
     pub const Error = union(enum) {
         unable_to_create_sym_link: struct {
@@ -198,8 +198,8 @@ pub const Repository = struct {
         repo: *Repository,
         allocator: Allocator,
         format: Oid.Format,
-        pack_file: *std.fs.File.Reader,
-        index_file: *std.fs.File.Reader,
+        pack_file: *Io.File.Reader,
+        index_file: *Io.File.Reader,
     ) !void {
         repo.* = .{ .odb = undefined };
         try repo.odb.init(allocator, format, pack_file, index_file);
@@ -213,7 +213,8 @@ pub const Repository = struct {
     /// Checks out the repository at `commit_oid` to `worktree`.
     pub fn checkout(
         repository: *Repository,
-        worktree: std.fs.Dir,
+        io: Io,
+        worktree: Io.Dir,
         commit_oid: Oid,
         diagnostics: *Diagnostics,
     ) !void {
@@ -223,13 +224,14 @@ pub const Repository = struct {
             if (commit_object.type != .commit) return error.NotACommit;
             break :tree_oid try getCommitTree(repository.odb.format, commit_object.data);
         };
-        try repository.checkoutTree(worktree, tree_oid, "", diagnostics);
+        try repository.checkoutTree(io, worktree, tree_oid, "", diagnostics);
     }
 
     /// Checks out the tree at `tree_oid` to `worktree`.
     fn checkoutTree(
         repository: *Repository,
-        dir: std.fs.Dir,
+        io: Io,
+        dir: Io.Dir,
         tree_oid: Oid,
         current_path: []const u8,
         diagnostics: *Diagnostics,
@@ -251,18 +253,18 @@ pub const Repository = struct {
         while (try tree_iter.next()) |entry| {
             switch (entry.type) {
                 .directory => {
-                    try dir.makeDir(entry.name);
-                    var subdir = try dir.openDir(entry.name, .{});
-                    defer subdir.close();
+                    try dir.createDir(io, entry.name, .default_dir);
+                    var subdir = try dir.openDir(io, entry.name, .{});
+                    defer subdir.close(io);
                     const sub_path = try std.fs.path.join(repository.odb.allocator, &.{ current_path, entry.name });
                     defer repository.odb.allocator.free(sub_path);
-                    try repository.checkoutTree(subdir, entry.oid, sub_path, diagnostics);
+                    try repository.checkoutTree(io, subdir, entry.oid, sub_path, diagnostics);
                 },
                 .file => {
                     try repository.odb.seekOid(entry.oid);
                     const file_object = try repository.odb.readObject();
                     if (file_object.type != .blob) return error.InvalidFile;
-                    var file = dir.createFile(entry.name, .{ .exclusive = true }) catch |e| {
+                    var file = dir.createFile(io, entry.name, .{ .exclusive = true }) catch |e| {
                         const file_name = try std.fs.path.join(diagnostics.allocator, &.{ current_path, entry.name });
                         errdefer diagnostics.allocator.free(file_name);
                         try diagnostics.errors.append(diagnostics.allocator, .{ .unable_to_create_file = .{
@@ -271,15 +273,15 @@ pub const Repository = struct {
                         } });
                         continue;
                     };
-                    defer file.close();
-                    try file.writeAll(file_object.data);
+                    defer file.close(io);
+                    try file.writePositionalAll(io, file_object.data, 0);
                 },
                 .symlink => {
                     try repository.odb.seekOid(entry.oid);
                     const symlink_object = try repository.odb.readObject();
                     if (symlink_object.type != .blob) return error.InvalidFile;
                     const link_name = symlink_object.data;
-                    dir.symLink(link_name, entry.name, .{}) catch |e| {
+                    dir.symLink(io, link_name, entry.name, .{}) catch |e| {
                         const file_name = try std.fs.path.join(diagnostics.allocator, &.{ current_path, entry.name });
                         errdefer diagnostics.allocator.free(file_name);
                         const link_name_dup = try diagnostics.allocator.dupe(u8, link_name);
@@ -294,7 +296,7 @@ pub const Repository = struct {
                 .gitlink => {
                     // Consistent with git archive behavior, create the directory but
                     // do nothing else
-                    try dir.makeDir(entry.name);
+                    try dir.createDir(io, entry.name, .default_dir);
                 },
             }
         }
@@ -370,9 +372,9 @@ pub const Repository = struct {
 /// [pack-format](https://git-scm.com/docs/pack-format).
 const Odb = struct {
     format: Oid.Format,
-    pack_file: *std.fs.File.Reader,
+    pack_file: *Io.File.Reader,
     index_header: IndexHeader,
-    index_file: *std.fs.File.Reader,
+    index_file: *Io.File.Reader,
     cache: ObjectCache = .{},
     allocator: Allocator,
 
@@ -381,8 +383,8 @@ const Odb = struct {
         odb: *Odb,
         allocator: Allocator,
         format: Oid.Format,
-        pack_file: *std.fs.File.Reader,
-        index_file: *std.fs.File.Reader,
+        pack_file: *Io.File.Reader,
+        index_file: *Io.File.Reader,
     ) !void {
         try pack_file.seekTo(0);
         try index_file.seekTo(0);
@@ -405,7 +407,7 @@ const Odb = struct {
     fn readObject(odb: *Odb) !Object {
         var base_offset = odb.pack_file.logicalPos();
         var base_header: EntryHeader = undefined;
-        var delta_offsets: std.ArrayListUnmanaged(u64) = .empty;
+        var delta_offsets: std.ArrayList(u64) = .empty;
         defer delta_offsets.deinit(odb.allocator);
         const base_object = while (true) {
             if (odb.cache.get(base_offset)) |base_object| break base_object;
@@ -1105,7 +1107,7 @@ pub const Session = struct {
                         return error.ReadFailed;
                     }) {
                         .flush => return error.EndOfStream,
-                        .data => |data| if (data.len > 1) switch (@as(StreamCode, @enumFromInt(data[0]))) {
+                        .data => |data| switch (@as(StreamCode, @enumFromInt(data[0]))) {
                             .pack_data => {
                                 input.toss(1);
                                 fs.remaining_len = data.len - 1;
@@ -1115,7 +1117,9 @@ pub const Session = struct {
                                 fs.err = error.ProtocolError;
                                 return error.ReadFailed;
                             },
-                            else => {},
+                            else => {
+                                input.toss(data.len);
+                            },
                         },
                         else => {
                             fs.err = error.UnexpectedPacket;
@@ -1270,14 +1274,14 @@ const IndexEntry = struct {
 pub fn indexPack(
     allocator: Allocator,
     format: Oid.Format,
-    pack: *std.fs.File.Reader,
-    index_writer: *std.fs.File.Writer,
+    pack: *Io.File.Reader,
+    index_writer: *Io.File.Writer,
 ) !void {
     try pack.seekTo(0);
 
     var index_entries: std.AutoHashMapUnmanaged(Oid, IndexEntry) = .empty;
     defer index_entries.deinit(allocator);
-    var pending_deltas: std.ArrayListUnmanaged(IndexEntry) = .empty;
+    var pending_deltas: std.ArrayList(IndexEntry) = .empty;
     defer pending_deltas.deinit(allocator);
 
     const pack_checksum = try indexPackFirstPass(allocator, format, pack, &index_entries, &pending_deltas);
@@ -1299,7 +1303,7 @@ pub fn indexPack(
         remaining_deltas = pending_deltas.items.len;
     }
 
-    var oids: std.ArrayListUnmanaged(Oid) = .empty;
+    var oids: std.ArrayList(Oid) = .empty;
     defer oids.deinit(allocator);
     try oids.ensureTotalCapacityPrecise(allocator, index_entries.count());
     var index_entries_iter = index_entries.iterator();
@@ -1341,7 +1345,7 @@ pub fn indexPack(
         try writer.writeInt(u32, index_entries.get(oid).?.crc32, .big);
     }
 
-    var big_offsets: std.ArrayListUnmanaged(u64) = .empty;
+    var big_offsets: std.ArrayList(u64) = .empty;
     defer big_offsets.deinit(allocator);
     for (oids.items) |oid| {
         const offset = index_entries.get(oid).?.offset;
@@ -1370,9 +1374,9 @@ pub fn indexPack(
 fn indexPackFirstPass(
     allocator: Allocator,
     format: Oid.Format,
-    pack: *std.fs.File.Reader,
+    pack: *Io.File.Reader,
     index_entries: *std.AutoHashMapUnmanaged(Oid, IndexEntry),
-    pending_deltas: *std.ArrayListUnmanaged(IndexEntry),
+    pending_deltas: *std.ArrayList(IndexEntry),
 ) !Oid {
     var flate_buffer: [std.compress.flate.max_window_len]u8 = undefined;
     var pack_buffer: [2048]u8 = undefined; // Reasonably large buffer for file system.
@@ -1423,7 +1427,7 @@ fn indexPackFirstPass(
 fn indexPackHashDelta(
     allocator: Allocator,
     format: Oid.Format,
-    pack: *std.fs.File.Reader,
+    pack: *Io.File.Reader,
     delta: IndexEntry,
     index_entries: std.AutoHashMapUnmanaged(Oid, IndexEntry),
     cache: *ObjectCache,
@@ -1431,7 +1435,7 @@ fn indexPackHashDelta(
     // Figure out the chain of deltas to resolve
     var base_offset = delta.offset;
     var base_header: EntryHeader = undefined;
-    var delta_offsets: std.ArrayListUnmanaged(u64) = .empty;
+    var delta_offsets: std.ArrayList(u64) = .empty;
     defer delta_offsets.deinit(allocator);
     const base_object = while (true) {
         if (cache.get(base_offset)) |base_object| break base_object;
@@ -1475,7 +1479,7 @@ fn indexPackHashDelta(
 fn resolveDeltaChain(
     allocator: Allocator,
     format: Oid.Format,
-    pack: *std.fs.File.Reader,
+    pack: *Io.File.Reader,
     base_object: Object,
     delta_offsets: []const u64,
     cache: *ObjectCache,
@@ -1582,17 +1586,17 @@ fn runRepositoryTest(io: Io, comptime format: Oid.Format, head_commit: []const u
 
     var git_dir = testing.tmpDir(.{});
     defer git_dir.cleanup();
-    var pack_file = try git_dir.dir.createFile("testrepo.pack", .{ .read = true });
-    defer pack_file.close();
-    try pack_file.writeAll(testrepo_pack);
+    var pack_file = try git_dir.dir.createFile(io, "testrepo.pack", .{ .read = true });
+    defer pack_file.close(io);
+    try pack_file.writeStreamingAll(io, testrepo_pack);
 
     var pack_file_buffer: [2000]u8 = undefined;
     var pack_file_reader = pack_file.reader(io, &pack_file_buffer);
 
-    var index_file = try git_dir.dir.createFile("testrepo.idx", .{ .read = true });
-    defer index_file.close();
+    var index_file = try git_dir.dir.createFile(io, "testrepo.idx", .{ .read = true });
+    defer index_file.close(io);
     var index_file_buffer: [2000]u8 = undefined;
-    var index_file_writer = index_file.writer(&index_file_buffer);
+    var index_file_writer = index_file.writer(io, &index_file_buffer);
     try indexPack(testing.allocator, format, &pack_file_reader, &index_file_writer);
 
     // Arbitrary size limit on files read while checking the repository contents
@@ -1600,7 +1604,7 @@ fn runRepositoryTest(io: Io, comptime format: Oid.Format, head_commit: []const u
     const max_file_size = 8192;
 
     if (!skip_checksums) {
-        const index_file_data = try git_dir.dir.readFileAlloc("testrepo.idx", testing.allocator, .limited(max_file_size));
+        const index_file_data = try git_dir.dir.readFileAlloc(io, "testrepo.idx", testing.allocator, .limited(max_file_size));
         defer testing.allocator.free(index_file_data);
         // testrepo.idx is generated by Git. The index created by this file should
         // match it exactly. Running `git verify-pack -v testrepo.pack` can verify
@@ -1621,7 +1625,7 @@ fn runRepositoryTest(io: Io, comptime format: Oid.Format, head_commit: []const u
 
     var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
     defer diagnostics.deinit();
-    try repository.checkout(worktree.dir, commit_id, &diagnostics);
+    try repository.checkout(io, worktree.dir, commit_id, &diagnostics);
     try testing.expect(diagnostics.errors.items.len == 0);
 
     const expected_files: []const []const u8 = &.{
@@ -1641,12 +1645,12 @@ fn runRepositoryTest(io: Io, comptime format: Oid.Format, head_commit: []const u
         "file8",
         "file9",
     };
-    var actual_files: std.ArrayListUnmanaged([]u8) = .empty;
+    var actual_files: std.ArrayList([]u8) = .empty;
     defer actual_files.deinit(testing.allocator);
     defer for (actual_files.items) |file| testing.allocator.free(file);
     var walker = try worktree.dir.walk(testing.allocator);
     defer walker.deinit();
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         const path = try testing.allocator.dupe(u8, entry.path);
         errdefer testing.allocator.free(path);
@@ -1676,7 +1680,7 @@ fn runRepositoryTest(io: Io, comptime format: Oid.Format, head_commit: []const u
         \\revision 19
         \\
     ;
-    const actual_file_contents = try worktree.dir.readFileAlloc("file", testing.allocator, .limited(max_file_size));
+    const actual_file_contents = try worktree.dir.readFileAlloc(io, "file", testing.allocator, .limited(max_file_size));
     defer testing.allocator.free(actual_file_contents);
     try testing.expectEqualStrings(expected_file_contents, actual_file_contents);
 }
@@ -1700,7 +1704,7 @@ test "SHA-256 packfile indexing and checkout" {
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
 
-    var threaded: Io.Threaded = .init(allocator);
+    var threaded: Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
@@ -1712,23 +1716,23 @@ pub fn main() !void {
 
     const format = std.meta.stringToEnum(Oid.Format, args[1]) orelse return error.InvalidFormat;
 
-    var pack_file = try std.fs.cwd().openFile(args[2], .{});
-    defer pack_file.close();
+    var pack_file = try Io.Dir.cwd().openFile(io, args[2], .{});
+    defer pack_file.close(io);
     var pack_file_buffer: [4096]u8 = undefined;
     var pack_file_reader = pack_file.reader(io, &pack_file_buffer);
 
     const commit = try Oid.parse(format, args[3]);
-    var worktree = try std.fs.cwd().makeOpenPath(args[4], .{});
-    defer worktree.close();
+    var worktree = try Io.Dir.cwd().createDirPathOpen(io, args[4], .{});
+    defer worktree.close(io);
 
-    var git_dir = try worktree.makeOpenPath(".git", .{});
-    defer git_dir.close();
+    var git_dir = try worktree.createDirPathOpen(io, ".git", .{});
+    defer git_dir.close(io);
 
     std.debug.print("Starting index...\n", .{});
-    var index_file = try git_dir.createFile("idx", .{ .read = true });
-    defer index_file.close();
+    var index_file = try git_dir.createFile(io, "idx", .{ .read = true });
+    defer index_file.close(io);
     var index_file_buffer: [4096]u8 = undefined;
-    var index_file_writer = index_file.writer(&index_file_buffer);
+    var index_file_writer = index_file.writer(io, &index_file_buffer);
     try indexPack(allocator, format, &pack_file_reader, &index_file_writer);
 
     std.debug.print("Starting checkout...\n", .{});
@@ -1738,7 +1742,7 @@ pub fn main() !void {
     defer repository.deinit();
     var diagnostics: Diagnostics = .{ .allocator = allocator };
     defer diagnostics.deinit();
-    try repository.checkout(worktree, commit, &diagnostics);
+    try repository.checkout(io, worktree, commit, &diagnostics);
 
     for (diagnostics.errors.items) |err| {
         std.debug.print("Diagnostic: {}\n", .{err});

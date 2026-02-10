@@ -7,7 +7,7 @@ TARGET="$1" # Example: riscv64-linux-gnu
 MCPU="$2" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
 
 ROOTDIR="$(pwd)"
-ZIG_VERSION="0.16.0-dev.1354+94e98bfe8"
+ZIG_VERSION="0.16.0-dev.2287+eb3f16db5"
 
 TARGET_OS_AND_ABI=${TARGET#*-} # Example: linux-gnu
 
@@ -17,6 +17,7 @@ case $TARGET_OS_CMAKE in
   macos*) TARGET_OS_CMAKE="Darwin";;
   freebsd*) TARGET_OS_CMAKE="FreeBSD";;
   netbsd*) TARGET_OS_CMAKE="NetBSD";;
+  openbsd*) TARGET_OS_CMAKE="OpenBSD";;
   windows*) TARGET_OS_CMAKE="Windows";;
   linux*) TARGET_OS_CMAKE="Linux";;
   native) TARGET_OS_CMAKE="";;

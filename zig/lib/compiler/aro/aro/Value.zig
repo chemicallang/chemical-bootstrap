@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const assert = std.debug.assert;
 const BigIntConst = std.math.big.int.Const;
 const BigIntMutable = std.math.big.int.Mutable;
@@ -8,7 +9,7 @@ const BigIntSpace = Interner.Tag.Int.BigIntSpace;
 
 const annex_g = @import("annex_g.zig");
 const Compilation = @import("Compilation.zig");
-const target_util = @import("target.zig");
+const Target = @import("Target.zig");
 const QualType = @import("TypeStore.zig").QualType;
 
 const Value = @This();
@@ -80,10 +81,10 @@ test "minUnsignedBits" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var comp = Compilation.init(std.testing.allocator, arena, undefined, std.fs.cwd());
+    var comp = Compilation.init(std.testing.allocator, arena, std.testing.io, undefined, Io.Dir.cwd());
     defer comp.deinit();
     const target_query = try std.Target.Query.parse(.{ .arch_os_abi = "x86_64-linux-gnu" });
-    comp.target = try std.zig.system.resolveTargetQuery(target_query);
+    comp.target = .fromZigTarget(try std.zig.system.resolveTargetQuery(std.testing.io, target_query));
 
     try Test.checkIntBits(&comp, 0, 0);
     try Test.checkIntBits(&comp, 1, 1);
@@ -119,10 +120,10 @@ test "minSignedBits" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var comp = Compilation.init(std.testing.allocator, arena, undefined, std.fs.cwd());
+    var comp = Compilation.init(std.testing.allocator, arena, std.testing.io, undefined, Io.Dir.cwd());
     defer comp.deinit();
     const target_query = try std.Target.Query.parse(.{ .arch_os_abi = "x86_64-linux-gnu" });
-    comp.target = try std.zig.system.resolveTargetQuery(target_query);
+    comp.target = .fromZigTarget(try std.zig.system.resolveTargetQuery(std.testing.io, target_query));
 
     try Test.checkIntBits(&comp, -1, 1);
     try Test.checkIntBits(&comp, -2, 2);
@@ -401,7 +402,7 @@ pub fn isZero(v: Value, comp: *const Compilation) bool {
     switch (v.ref()) {
         .zero => return true,
         .one => return false,
-        .null => return target_util.nullRepr(comp.target) == 0,
+        .null => return comp.target.nullRepr() == 0,
         else => {},
     }
     const key = comp.interner.get(v.ref());
@@ -1080,7 +1081,7 @@ const NestedPrint = union(enum) {
     },
 };
 
-pub fn printPointer(offset: Value, base: []const u8, comp: *const Compilation, w: *std.Io.Writer) std.Io.Writer.Error!void {
+pub fn printPointer(offset: Value, base: []const u8, comp: *const Compilation, w: *Io.Writer) Io.Writer.Error!void {
     try w.writeByte('&');
     try w.writeAll(base);
     if (!offset.isZero(comp)) {
@@ -1089,7 +1090,7 @@ pub fn printPointer(offset: Value, base: []const u8, comp: *const Compilation, w
     }
 }
 
-pub fn print(v: Value, qt: QualType, comp: *const Compilation, w: *std.Io.Writer) std.Io.Writer.Error!?NestedPrint {
+pub fn print(v: Value, qt: QualType, comp: *const Compilation, w: *Io.Writer) Io.Writer.Error!?NestedPrint {
     if (qt.is(comp, .bool)) {
         try w.writeAll(if (v.isZero(comp)) "false" else "true");
         return null;
@@ -1116,7 +1117,7 @@ pub fn print(v: Value, qt: QualType, comp: *const Compilation, w: *std.Io.Writer
     return null;
 }
 
-pub fn printString(bytes: []const u8, qt: QualType, comp: *const Compilation, w: *std.Io.Writer) std.Io.Writer.Error!void {
+pub fn printString(bytes: []const u8, qt: QualType, comp: *const Compilation, w: *Io.Writer) Io.Writer.Error!void {
     const size: Compilation.CharUnitSize = @enumFromInt(qt.childType(comp).sizeof(comp));
     const without_null = bytes[0 .. bytes.len - @intFromEnum(size)];
     try w.writeByte('"');

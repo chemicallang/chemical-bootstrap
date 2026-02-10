@@ -6,14 +6,14 @@ file_handle: File.HandleIndex,
 tag: enum { dylib, tbd },
 
 exports: std.MultiArrayList(Export) = .{},
-strtab: std.ArrayListUnmanaged(u8) = .empty,
+strtab: std.ArrayList(u8) = .empty,
 id: ?Id = null,
 ordinal: u16 = 0,
 
-symbols: std.ArrayListUnmanaged(Symbol) = .empty,
-symbols_extra: std.ArrayListUnmanaged(u32) = .empty,
-globals: std.ArrayListUnmanaged(MachO.SymbolResolver.Index) = .empty,
-dependents: std.ArrayListUnmanaged(Id) = .empty,
+symbols: std.ArrayList(Symbol) = .empty,
+symbols_extra: std.ArrayList(u32) = .empty,
+globals: std.ArrayList(MachO.SymbolResolver.Index) = .empty,
+dependents: std.ArrayList(Id) = .empty,
 rpaths: std.StringArrayHashMapUnmanaged(void) = .empty,
 umbrella: File.Index,
 platform: ?MachO.Platform = null,
@@ -57,7 +57,9 @@ fn parseBinary(self: *Dylib, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = macho_file.base.comp.gpa;
+    const comp = macho_file.base.comp;
+    const io = comp.io;
+    const gpa = comp.gpa;
     const file = macho_file.getFileHandle(self.file_handle);
     const offset = self.offset;
 
@@ -65,7 +67,7 @@ fn parseBinary(self: *Dylib, macho_file: *MachO) !void {
 
     var header_buffer: [@sizeOf(macho.mach_header_64)]u8 = undefined;
     {
-        const amt = try file.preadAll(&header_buffer, offset);
+        const amt = try file.readPositionalAll(io, &header_buffer, offset);
         if (amt != @sizeOf(macho.mach_header_64)) return error.InputOutput;
     }
     const header = @as(*align(1) const macho.mach_header_64, @ptrCast(&header_buffer)).*;
@@ -86,15 +88,12 @@ fn parseBinary(self: *Dylib, macho_file: *MachO) !void {
     const lc_buffer = try gpa.alloc(u8, header.sizeofcmds);
     defer gpa.free(lc_buffer);
     {
-        const amt = try file.preadAll(lc_buffer, offset + @sizeOf(macho.mach_header_64));
+        const amt = try file.readPositionalAll(io, lc_buffer, offset + @sizeOf(macho.mach_header_64));
         if (amt != lc_buffer.len) return error.InputOutput;
     }
 
-    var it = LoadCommandIterator{
-        .ncmds = header.ncmds,
-        .buffer = lc_buffer,
-    };
-    while (it.next()) |cmd| switch (cmd.cmd()) {
+    var it = LoadCommandIterator.init(&header, lc_buffer) catch |err| std.debug.panic("bad dylib: {t}", .{err});
+    while (it.next() catch |err| std.debug.panic("bad dylib: {t}", .{err})) |cmd| switch (cmd.hdr.cmd) {
         .ID_DYLIB => {
             self.id = try Id.fromLoadCommand(gpa, cmd.cast(macho.dylib_command).?, cmd.getDylibPathName());
         },
@@ -106,7 +105,7 @@ fn parseBinary(self: *Dylib, macho_file: *MachO) !void {
             const dyld_cmd = cmd.cast(macho.dyld_info_command).?;
             const data = try gpa.alloc(u8, dyld_cmd.export_size);
             defer gpa.free(data);
-            const amt = try file.preadAll(data, dyld_cmd.export_off + offset);
+            const amt = try file.readPositionalAll(io, data, dyld_cmd.export_off + offset);
             if (amt != data.len) return error.InputOutput;
             try self.parseTrie(data, macho_file);
         },
@@ -114,7 +113,7 @@ fn parseBinary(self: *Dylib, macho_file: *MachO) !void {
             const ld_cmd = cmd.cast(macho.linkedit_data_command).?;
             const data = try gpa.alloc(u8, ld_cmd.datasize);
             defer gpa.free(data);
-            const amt = try file.preadAll(data, ld_cmd.dataoff + offset);
+            const amt = try file.readPositionalAll(io, data, ld_cmd.dataoff + offset);
             if (amt != data.len) return error.InputOutput;
             try self.parseTrie(data, macho_file);
         },
@@ -241,13 +240,15 @@ fn parseTbd(self: *Dylib, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = macho_file.base.comp.gpa;
+    const comp = macho_file.base.comp;
+    const gpa = comp.gpa;
+    const io = comp.io;
 
     log.debug("parsing dylib from stub: {f}", .{self.path});
 
     const file = macho_file.getFileHandle(self.file_handle);
-    var lib_stub = LibStub.loadFromFile(gpa, file) catch |err| {
-        try macho_file.reportParseError2(self.index, "failed to parse TBD file: {s}", .{@errorName(err)});
+    var lib_stub = LibStub.loadFromFile(gpa, io, file) catch |err| {
+        try macho_file.reportParseError2(self.index, "failed to parse TBD file: {t}", .{err});
         return error.MalformedTbd;
     };
     defer lib_stub.deinit();
@@ -698,7 +699,7 @@ pub const TargetMatcher = struct {
     allocator: Allocator,
     cpu_arch: std.Target.Cpu.Arch,
     platform: macho.PLATFORM,
-    target_strings: std.ArrayListUnmanaged([]const u8) = .empty,
+    target_strings: std.ArrayList([]const u8) = .empty,
 
     pub fn init(allocator: Allocator, cpu_arch: std.Target.Cpu.Arch, platform: macho.PLATFORM) !TargetMatcher {
         var self = TargetMatcher{
@@ -715,6 +716,11 @@ pub const TargetMatcher = struct {
                 // hosts dylibs too.
                 const host_target = try targetToAppleString(allocator, cpu_arch, .MACOS);
                 try self.target_strings.append(allocator, host_target);
+            },
+            .MACCATALYST => {
+                // Mac Catalyst is allowed to link macOS libraries in a TBD because Apple were apparently too lazy
+                // to add the proper target strings despite doing so in other places in the format???
+                try self.target_strings.append(allocator, try targetToAppleString(allocator, cpu_arch, .MACOS));
             },
             .MACOS => {
                 // Turns out that around 10.13/10.14 macOS release version, Apple changed the target tags in

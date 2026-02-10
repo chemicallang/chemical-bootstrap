@@ -749,6 +749,7 @@ test "packed struct with fp fields" {
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
 
     const S = packed struct {
         data0: f32,
@@ -2034,10 +2035,7 @@ test "matching captures causes struct equivalence" {
         fn UnsignedWrapper(comptime I: type) type {
             const bits = @typeInfo(I).int.bits;
             return struct {
-                x: @Type(.{ .int = .{
-                    .signedness = .unsigned,
-                    .bits = bits,
-                } }),
+                x: @Int(.unsigned, bits),
             };
         }
     };
@@ -2175,4 +2173,14 @@ test "avoid unused field function body compile error" {
     };
 
     try expect(Case.entry() == 1);
+}
+
+test "pass a pointer to a comptime-only struct field to a function" {
+    const S = struct {
+        fn checkField(field_ptr: *const type) !void {
+            try expect(field_ptr.* == u42);
+        }
+    };
+    const s: struct { x: type } = .{ .x = u42 };
+    try S.checkField(&s.x);
 }

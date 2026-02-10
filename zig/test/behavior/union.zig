@@ -2198,14 +2198,8 @@ test "matching captures causes union equivalence" {
         fn SignedUnsigned(comptime I: type) type {
             const bits = @typeInfo(I).int.bits;
             return union {
-                u: @Type(.{ .int = .{
-                    .signedness = .unsigned,
-                    .bits = bits,
-                } }),
-                i: @Type(.{ .int = .{
-                    .signedness = .signed,
-                    .bits = bits,
-                } }),
+                u: @Int(.unsigned, bits),
+                i: @Int(.signed, bits),
             };
         }
     };
@@ -2223,6 +2217,7 @@ test "matching captures causes union equivalence" {
 test "signed enum tag with negative value" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
 
     const Enum = enum(i8) {

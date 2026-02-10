@@ -1,13 +1,15 @@
-//! This struct represents a kernel thread, and acts as a namespace for concurrency
-//! primitives that operate on kernel threads. For concurrency primitives that support
-//! both evented I/O and async I/O, see the respective names in the top level std namespace.
+//! This struct represents a kernel thread, and acts as a namespace for
+//! concurrency primitives that operate on kernel threads. For concurrency
+//! primitives that interact with the I/O interface, see `std.Io`.
 
-const std = @import("std.zig");
 const builtin = @import("builtin");
-const math = std.math;
-const assert = std.debug.assert;
 const target = builtin.target;
 const native_os = builtin.os.tag;
+
+const std = @import("std.zig");
+const Io = std.Io;
+const math = std.math;
+const assert = std.debug.assert;
 const posix = std.posix;
 const windows = std.os.windows;
 const testing = std.testing;
@@ -17,8 +19,9 @@ pub const Mutex = @import("Thread/Mutex.zig");
 pub const Semaphore = @import("Thread/Semaphore.zig");
 pub const Condition = @import("Thread/Condition.zig");
 pub const RwLock = @import("Thread/RwLock.zig");
-pub const Pool = @import("Thread/Pool.zig");
 pub const WaitGroup = @import("Thread/WaitGroup.zig");
+
+pub const Pool = @compileError("deprecated; consider using 'std.Io.Group' with 'std.Io.Threaded'");
 
 pub const use_pthreads = native_os != .windows and native_os != .wasi and builtin.link_libc;
 
@@ -172,9 +175,9 @@ pub const SetNameError = error{
     Unsupported,
     Unexpected,
     InvalidWtf8,
-} || posix.PrctlError || posix.WriteError || std.fs.File.OpenError || std.fmt.BufPrintError;
+} || posix.PrctlError || Io.File.Writer.Error || Io.File.OpenError || std.fmt.BufPrintError;
 
-pub fn setName(self: Thread, name: []const u8) SetNameError!void {
+pub fn setName(self: Thread, io: Io, name: []const u8) SetNameError!void {
     if (name.len > max_name_len) return error.NameTooLong;
 
     const name_with_terminator = blk: {
@@ -205,10 +208,10 @@ pub fn setName(self: Thread, name: []const u8) SetNameError!void {
             var buf: [32]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "/proc/self/task/{d}/comm", .{self.getHandle()});
 
-            const file = try std.fs.cwd().openFile(path, .{ .mode = .write_only });
-            defer file.close();
+            const file = try Io.Dir.cwd().openFile(io, path, .{ .mode = .write_only });
+            defer file.close(io);
 
-            try file.writeAll(name);
+            try file.writeStreamingAll(io, name);
             return;
         },
         .windows => {
@@ -225,7 +228,7 @@ pub fn setName(self: Thread, name: []const u8) SetNameError!void {
 
             switch (windows.ntdll.NtSetInformationThread(
                 self.getHandle(),
-                .ThreadNameInformation,
+                .NameInformation,
                 &unicode_string,
                 @sizeOf(windows.UNICODE_STRING),
             )) {
@@ -290,7 +293,7 @@ pub fn setName(self: Thread, name: []const u8) SetNameError!void {
 pub const GetNameError = error{
     Unsupported,
     Unexpected,
-} || posix.PrctlError || posix.ReadError || std.fs.File.OpenError || std.fmt.BufPrintError;
+} || posix.PrctlError || posix.ReadError || Io.File.OpenError || std.fmt.BufPrintError;
 
 /// On Windows, the result is encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On other platforms, the result is an opaque sequence of bytes with no particular encoding.
@@ -319,11 +322,10 @@ pub fn getName(self: Thread, buffer_ptr: *[max_name_len:0]u8) GetNameError!?[]co
             var buf: [32]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "/proc/self/task/{d}/comm", .{self.getHandle()});
 
-            var threaded: std.Io.Threaded = .init_single_threaded;
-            const io = threaded.ioBasic();
+            const io = std.Options.debug_io;
 
-            const file = try std.fs.cwd().openFile(path, .{});
-            defer file.close();
+            const file = try Io.Dir.cwd().openFile(io, path, .{});
+            defer file.close(io);
 
             var file_reader = file.readerStreaming(io, &.{});
             const data_len = file_reader.interface.readSliceShort(buffer_ptr[0 .. max_name_len + 1]) catch |err| switch (err) {
@@ -337,7 +339,7 @@ pub fn getName(self: Thread, buffer_ptr: *[max_name_len:0]u8) GetNameError!?[]co
 
             switch (windows.ntdll.NtQueryInformationThread(
                 self.getHandle(),
-                .ThreadNameInformation,
+                .NameInformation,
                 &buf,
                 buf_capacity,
                 null,
@@ -520,12 +522,10 @@ pub const YieldError = error{
 
 /// Yields the current thread potentially allowing other threads to run.
 pub fn yield() YieldError!void {
-    if (native_os == .windows) {
-        // The return value has to do with how many other threads there are; it is not
-        // an error condition on Windows.
-        _ = windows.kernel32.SwitchToThread();
-        return;
-    }
+    if (native_os == .windows) switch (windows.ntdll.NtYieldExecution()) {
+        .SUCCESS, .NO_YIELD_PERFORMED => return,
+        else => return error.SystemCannotYield,
+    };
     switch (posix.errno(posix.system.sched_yield())) {
         .SUCCESS => return,
         .NOSYS => return error.SystemCannotYield,
@@ -540,13 +540,16 @@ const Completion = std.atomic.Value(enum(if (builtin.zig_backend == .stage2_risc
     completed,
 });
 
-/// Used by the Thread implementations to call the spawned function with the arguments.
+/// Performs implementation-agnostic thread setup (`maybeAttachSignalStack`), then calls the given
+/// thread entry point `f` with `args` and handles the result.
 fn callFn(comptime f: anytype, args: anytype) switch (Impl) {
     WindowsThreadImpl => windows.DWORD,
     LinuxThreadImpl => u8,
     PosixThreadImpl => ?*anyopaque,
     else => unreachable,
 } {
+    maybeAttachSignalStack();
+
     const default_value = if (Impl == PosixThreadImpl) null else 0;
     const bad_fn_ret = "expected return type of startFn to be 'u8', 'noreturn', '!noreturn', 'void', or '!void'";
 
@@ -646,11 +649,11 @@ const WindowsThreadImpl = struct {
     const ThreadCompletion = struct {
         completion: Completion,
         heap_ptr: windows.PVOID,
-        heap_handle: windows.HANDLE,
+        heap_handle: *windows.HEAP,
         thread_handle: windows.HANDLE = undefined,
 
         fn free(self: ThreadCompletion) void {
-            const status = windows.kernel32.HeapFree(self.heap_handle, 0, self.heap_ptr);
+            const status = windows.ntdll.RtlFreeHeap(self.heap_handle, .{}, self.heap_ptr);
             assert(status != 0);
         }
     };
@@ -672,10 +675,10 @@ const WindowsThreadImpl = struct {
             }
         };
 
-        const heap_handle = windows.kernel32.GetProcessHeap() orelse return error.OutOfMemory;
+        const heap_handle = windows.GetProcessHeap() orelse return error.OutOfMemory;
         const alloc_bytes = @alignOf(Instance) + @sizeOf(Instance);
-        const alloc_ptr = windows.ntdll.RtlAllocateHeap(heap_handle, 0, alloc_bytes) orelse return error.OutOfMemory;
-        errdefer assert(windows.kernel32.HeapFree(heap_handle, 0, alloc_ptr) != 0);
+        const alloc_ptr = windows.ntdll.RtlAllocateHeap(heap_handle, .{}, alloc_bytes) orelse return error.OutOfMemory;
+        errdefer assert(windows.ntdll.RtlFreeHeap(heap_handle, .{}, alloc_ptr) != 0);
 
         const instance_bytes = @as([*]u8, @ptrCast(alloc_ptr))[0..alloc_bytes];
         var fba = std.heap.FixedBufferAllocator.init(instance_bytes);
@@ -692,8 +695,7 @@ const WindowsThreadImpl = struct {
         // Windows appears to only support SYSTEM_INFO.dwAllocationGranularity minimum stack size.
         // Going lower makes it default to that specified in the executable (~1mb).
         // Its also fine if the limit here is incorrect as stack size is only a hint.
-        var stack_size = std.math.cast(u32, config.stack_size) orelse std.math.maxInt(u32);
-        stack_size = @max(64 * 1024, stack_size);
+        const stack_size = @max(64 * 1024, std.math.lossyCast(u32, config.stack_size));
 
         instance.thread.thread_handle = windows.kernel32.CreateThread(
             null,
@@ -1225,19 +1227,21 @@ const LinuxThreadImpl = struct {
         /// Ported over from musl libc's pthread detached implementation:
         /// https://github.com/ifduyue/musl/search?q=__unmapself
         fn freeAndExit(self: *ThreadCompletion) noreturn {
+            // If a signal were delivered between SYS_munmap and SYS_exit, any installed signal
+            // handler would immediately segfault due to the stack being unmapped. To avoid this,
+            // we need to mask all signals before entering the inline asm.
+            posix.sigprocmask(std.posix.SIG.BLOCK, &std.os.linux.sigfillset(), null);
             switch (target.cpu.arch) {
                 .x86 => asm volatile (
                     \\  movl $91, %%eax # SYS_munmap
-                    \\  movl %[ptr], %%ebx
-                    \\  movl %[len], %%ecx
                     \\  int $128
                     \\  movl $1, %%eax # SYS_exit
                     \\  movl $0, %%ebx
                     \\  int $128
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{ebx}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{ecx}" (self.mapped.len),
+                ),
                 .x86_64 => asm volatile (switch (target.abi) {
                         .gnux32, .muslx32 =>
                         \\  movl $0x4000000b, %%eax # SYS_munmap
@@ -1260,88 +1264,74 @@ const LinuxThreadImpl = struct {
                 ),
                 .arm, .armeb, .thumb, .thumbeb => asm volatile (
                     \\  mov r7, #91 // SYS_munmap
-                    \\  mov r0, %[ptr]
-                    \\  mov r1, %[len]
                     \\  svc 0
                     \\  mov r7, #1 // SYS_exit
                     \\  mov r0, #0
                     \\  svc 0
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{r0}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r1}" (self.mapped.len),
+                ),
                 .aarch64, .aarch64_be => asm volatile (
                     \\  mov x8, #215 // SYS_munmap
-                    \\  mov x0, %[ptr]
-                    \\  mov x1, %[len]
                     \\  svc 0
                     \\  mov x8, #93 // SYS_exit
                     \\  mov x0, #0
                     \\  svc 0
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{x0}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{x1}" (self.mapped.len),
+                ),
                 .alpha => asm volatile (
                     \\ ldi $0, 73 # SYS_munmap
-                    \\ mov %[ptr], $16
-                    \\ mov %[len], $17
                     \\ callsys
                     \\ ldi $0, 1 # SYS_exit
                     \\ ldi $16, 0
                     \\ callsys
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{r16}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r17}" (self.mapped.len),
+                ),
                 .hexagon => asm volatile (
                     \\  r6 = #215 // SYS_munmap
-                    \\  r0 = %[ptr]
-                    \\  r1 = %[len]
                     \\  trap0(#1)
                     \\  r6 = #93 // SYS_exit
                     \\  r0 = #0
                     \\  trap0(#1)
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{r0}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r1}" (self.mapped.len),
+                ),
                 .hppa => asm volatile (
                     \\ ldi 91, %%r20 /* SYS_munmap */
-                    \\ copy %[ptr], %%r26
-                    \\ copy %[len], %%r25
                     \\ ble 0x100(%%sr2, %%r0)
                     \\ ldi 1, %%r20 /* SYS_exit */
                     \\ ldi 0, %%r26
                     \\ ble 0x100(%%sr2, %%r0)
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{r26}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r25}" (self.mapped.len),
+                ),
                 .m68k => asm volatile (
                     \\ move.l #91, %%d0 // SYS_munmap
-                    \\ move.l %[ptr], %%d1
-                    \\ move.l %[len], %%d2
                     \\ trap #0
                     \\ move.l #1, %%d0 // SYS_exit
                     \\ move.l #0, %%d1
                     \\ trap #0
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{d1}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{d2}" (self.mapped.len),
+                ),
                 .microblaze, .microblazeel => asm volatile (
                     \\ ori r12, r0, 91 # SYS_munmap
-                    \\ ori r5, %[ptr], 0
-                    \\ ori r6, %[len], 0
                     \\ brki r14, 0x8
                     \\ ori r12, r0, 1 # SYS_exit
                     \\ or r5, r0, r0
                     \\ brki r14, 0x8
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{r5}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r6}" (self.mapped.len),
+                ),
                 // We set `sp` to the address of the current function as a workaround for a Linux
                 // kernel bug that caused syscalls to return EFAULT if the stack pointer is invalid.
                 // The bug was introduced in 46e12c07b3b9603c60fc1d421ff18618241cb081 and fixed in
@@ -1349,21 +1339,17 @@ const LinuxThreadImpl = struct {
                 .mips, .mipsel => asm volatile (
                     \\ move $sp, $t9
                     \\ li $v0, 4091 # SYS_munmap
-                    \\ move $a0, %[ptr]
-                    \\ move $a1, %[len]
                     \\ syscall
                     \\ li $v0, 4001 # SYS_exit
                     \\ li $a0, 0
                     \\ syscall
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{$4}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{$5}" (self.mapped.len),
+                ),
                 .mips64, .mips64el => asm volatile (switch (target.abi) {
                         .gnuabin32, .muslabin32 =>
                         \\ li $v0, 6011 # SYS_munmap
-                        \\ move $a0, %[ptr]
-                        \\ move $a1, %[len]
                         \\ syscall
                         \\ li $v0, 6058 # SYS_exit
                         \\ li $a0, 0
@@ -1371,8 +1357,6 @@ const LinuxThreadImpl = struct {
                         ,
                         else =>
                         \\ li $v0, 5011 # SYS_munmap
-                        \\ move $a0, %[ptr]
-                        \\ move $a1, %[len]
                         \\ syscall
                         \\ li $v0, 5058 # SYS_exit
                         \\ li $a0, 0
@@ -1380,60 +1364,50 @@ const LinuxThreadImpl = struct {
                         ,
                     }
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{$4}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{$5}" (self.mapped.len),
+                ),
                 .or1k => asm volatile (
                     \\ l.ori r11, r0, 215 # SYS_munmap
-                    \\ l.ori r3, %[ptr]
-                    \\ l.ori r4, %[len]
                     \\ l.sys 1
                     \\ l.ori r11, r0, 93 # SYS_exit
                     \\ l.ori r3, r0, r0
                     \\ l.sys 1
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{r3}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r4}" (self.mapped.len),
+                ),
                 .powerpc, .powerpcle, .powerpc64, .powerpc64le => asm volatile (
                     \\  li 0, 91 # SYS_munmap
-                    \\  mr 3, %[ptr]
-                    \\  mr 4, %[len]
                     \\  sc
                     \\  li 0, 1 # SYS_exit
                     \\  li 3, 0
                     \\  sc
                     \\  blr
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{r3}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r4}" (self.mapped.len),
+                ),
                 .riscv32, .riscv64 => asm volatile (
                     \\  li a7, 215 # SYS_munmap
-                    \\  mv a0, %[ptr]
-                    \\  mv a1, %[len]
                     \\  ecall
                     \\  li a7, 93 # SYS_exit
                     \\  mv a0, zero
                     \\  ecall
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{a0}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{a1}" (self.mapped.len),
+                ),
                 .s390x => asm volatile (
-                    \\  lgr %%r2, %[ptr]
-                    \\  lgr %%r3, %[len]
                     \\  svc 91 # SYS_munmap
                     \\  lghi %%r2, 0
                     \\  svc 1 # SYS_exit
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{r2}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r3}" (self.mapped.len),
+                ),
                 .sh, .sheb => asm volatile (
                     \\ mov #91, r3 ! SYS_munmap
-                    \\ mov %[ptr], r4
-                    \\ mov %[len], r5
                     \\ trapa #31
                     \\ or r0, r0
                     \\ or r0, r0
@@ -1449,9 +1423,9 @@ const LinuxThreadImpl = struct {
                     \\ or r0, r0
                     \\ or r0, r0
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : .{ .memory = true }),
+                    : [ptr] "{r4}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r5}" (self.mapped.len),
+                ),
                 .sparc => asm volatile (
                     \\ # See sparc64 comments below.
                     \\ 1:
@@ -1461,17 +1435,17 @@ const LinuxThreadImpl = struct {
                     \\  ba 1b
                     \\  restore
                     \\ 2:
+                    \\  mov %%g1, %%o0 // ptr
+                    \\  mov %%g2, %%o1 // len
                     \\  mov 73, %%g1 // SYS_munmap
-                    \\  mov %[ptr], %%o0
-                    \\  mov %[len], %%o1
                     \\  t 0x3 # ST_FLUSH_WINDOWS
                     \\  t 0x10
                     \\  mov 1, %%g1 // SYS_exit
                     \\  mov 0, %%o0
                     \\  t 0x10
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
+                    : [ptr] "{g1}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{g2}" (self.mapped.len),
                     : .{ .memory = true }),
                 .sparc64 => asm volatile (
                     \\ # SPARCs really don't like it when active stack frames
@@ -1485,9 +1459,9 @@ const LinuxThreadImpl = struct {
                     \\  ba 1b
                     \\  restore
                     \\ 2:
+                    \\  mov %%g1, %%o0 // ptr
+                    \\  mov %%g2, %%o1 // len
                     \\  mov 73, %%g1 // SYS_munmap
-                    \\  mov %[ptr], %%o0
-                    \\  mov %[len], %%o1
                     \\  # Flush register window contents to prevent background
                     \\  # memory access before unmapping the stack.
                     \\  flushw
@@ -1496,20 +1470,18 @@ const LinuxThreadImpl = struct {
                     \\  mov 0, %%o0
                     \\  t 0x6d
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
+                    : [ptr] "{g1}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{g2}" (self.mapped.len),
                     : .{ .memory = true }),
                 .loongarch32, .loongarch64 => asm volatile (
-                    \\ or      $a0, $zero, %[ptr]
-                    \\ or      $a1, $zero, %[len]
                     \\ ori     $a7, $zero, 215     # SYS_munmap
                     \\ syscall 0                   # call munmap
                     \\ ori     $a0, $zero, 0
                     \\ ori     $a7, $zero, 93      # SYS_exit
                     \\ syscall 0                   # call exit
                     :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
+                    : [ptr] "{r4}" (@intFromPtr(self.mapped.ptr)),
+                      [len] "{r5}" (self.mapped.len),
                     : .{ .memory = true }),
                 else => |cpu_arch| @compileError("Unsupported linux arch: " ++ @tagName(cpu_arch)),
             }
@@ -1566,7 +1538,7 @@ const LinuxThreadImpl = struct {
         const mapped = posix.mmap(
             null,
             map_bytes,
-            posix.PROT.NONE,
+            .{},
             .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
             -1,
             0,
@@ -1582,14 +1554,14 @@ const LinuxThreadImpl = struct {
         assert(mapped.len >= map_bytes);
         errdefer posix.munmap(mapped);
 
-        // map everything but the guard page as read/write
-        posix.mprotect(
-            @alignCast(mapped[guard_offset..]),
-            posix.PROT.READ | posix.PROT.WRITE,
-        ) catch |err| switch (err) {
-            error.AccessDenied => unreachable,
-            else => |e| return e,
-        };
+        // Map everything but the guard page as read/write.
+        const guarded: []align(std.heap.page_size_min) u8 = @alignCast(mapped[guard_offset..]);
+        const protection: posix.PROT = .{ .READ = true, .WRITE = true };
+        switch (posix.errno(posix.system.mprotect(guarded.ptr, guarded.len, protection))) {
+            .SUCCESS => {},
+            .NOMEM => return error.OutOfMemory,
+            else => |err| return posix.unexpectedErrno(err),
+        }
 
         // Prepare the TLS segment and prepare a user_desc struct when needed on x86
         var tls_ptr = linux.tls.prepareArea(mapped[tls_offset..]);
@@ -1622,7 +1594,7 @@ const LinuxThreadImpl = struct {
             linux.CLONE.PARENT_SETTID | linux.CLONE.CHILD_CLEARTID |
             linux.CLONE.SIGHAND | linux.CLONE.SYSVSEM | linux.CLONE.SETTLS;
 
-        switch (linux.E.init(linux.clone(
+        switch (linux.errno(linux.clone(
             Instance.entryFn,
             @intFromPtr(&mapped[stack_offset]),
             flags,
@@ -1661,7 +1633,7 @@ const LinuxThreadImpl = struct {
             const tid = self.thread.child_tid.load(.seq_cst);
             if (tid == 0) break;
 
-            switch (linux.E.init(linux.futex_4arg(
+            switch (linux.errno(linux.futex_4arg(
                 &self.thread.child_tid.raw,
                 .{ .cmd = .WAIT, .private = false },
                 @bitCast(tid),
@@ -1676,14 +1648,14 @@ const LinuxThreadImpl = struct {
     }
 };
 
-fn testThreadName(thread: *Thread) !void {
+fn testThreadName(io: Io, thread: *Thread) !void {
     const testCases = &[_][]const u8{
         "mythread",
         "b" ** max_name_len,
     };
 
     inline for (testCases) |tc| {
-        try thread.setName(tc);
+        try thread.setName(io, tc);
 
         var name_buffer: [max_name_len:0]u8 = undefined;
 
@@ -1698,6 +1670,8 @@ fn testThreadName(thread: *Thread) !void {
 test "setName, getName" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
+    const io = testing.io;
+
     const Context = struct {
         start_wait_event: ResetEvent = .unset,
         test_done_event: ResetEvent = .unset,
@@ -1711,11 +1685,11 @@ test "setName, getName" {
             ctx.start_wait_event.wait();
 
             switch (native_os) {
-                .windows => testThreadName(&ctx.thread) catch |err| switch (err) {
+                .windows => testThreadName(io, &ctx.thread) catch |err| switch (err) {
                     error.Unsupported => return error.SkipZigTest,
                     else => return err,
                 },
-                else => try testThreadName(&ctx.thread),
+                else => try testThreadName(io, &ctx.thread),
             }
 
             // Signal our test is done
@@ -1735,14 +1709,14 @@ test "setName, getName" {
 
     switch (native_os) {
         .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => {
-            const res = thread.setName("foobar");
+            const res = thread.setName(io, "foobar");
             try std.testing.expectError(error.Unsupported, res);
         },
-        .windows => testThreadName(&thread) catch |err| switch (err) {
+        .windows => testThreadName(io, &thread) catch |err| switch (err) {
             error.Unsupported => return error.SkipZigTest,
             else => return err,
         },
-        else => try testThreadName(&thread),
+        else => try testThreadName(io, &thread),
     }
 
     context.thread_done_event.set();
@@ -1756,7 +1730,6 @@ test {
     _ = Semaphore;
     _ = Condition;
     _ = RwLock;
-    _ = Pool;
 }
 
 fn testIncrementNotify(value: *usize, event: *ResetEvent) void {
@@ -1946,4 +1919,28 @@ test "ResetEvent broadcast" {
     defer for (threads) |t| t.join();
 
     ctx.run();
+}
+
+/// Configures the per-thread alternative signal stack requested by `std.options.signal_stack_size`.
+pub fn maybeAttachSignalStack() void {
+    const size = std.options.signal_stack_size orelse return;
+    switch (builtin.target.os.tag) {
+        // TODO: Windows vectored exception handlers always run on the main stack, but we could use
+        // some target-specific inline assembly to swap the stack pointer.
+        .windows => return,
+        .wasi => return,
+        else => {},
+    }
+    const global = struct {
+        threadlocal var signal_stack: [size]u8 = undefined;
+    };
+    std.posix.sigaltstack(&.{
+        .sp = &global.signal_stack,
+        .flags = 0,
+        .size = size,
+    }, null) catch |err| switch (err) {
+        error.SizeTooSmall => unreachable, // `std.options.signal_stack_size` must be sufficient for the target
+        error.PermissionDenied => unreachable, // called `maybeAttachSignalStack` from a signal handler
+        error.Unexpected => @panic("unexpected error attaching signal stack"),
+    };
 }

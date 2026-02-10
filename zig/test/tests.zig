@@ -187,29 +187,30 @@ const test_targets = blk: {
             .link_libc = true,
         },
 
-        .{
-            .target = .{
-                .cpu_arch = .aarch64,
-                .os_tag = .linux,
-                .abi = .none,
-            },
-            .use_llvm = false,
-            .use_lld = false,
-            .optimize_mode = .ReleaseFast,
-            .strip = true,
-        },
-        .{
-            .target = .{
-                .cpu_arch = .aarch64,
-                .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.neoverse_n1 },
-                .os_tag = .linux,
-                .abi = .none,
-            },
-            .use_llvm = false,
-            .use_lld = false,
-            .optimize_mode = .ReleaseFast,
-            .strip = true,
-        },
+        // Disabled due to https://codeberg.org/ziglang/zig/pulls/30232#issuecomment-9203351
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .aarch64,
+        //        .os_tag = .linux,
+        //        .abi = .none,
+        //    },
+        //    .use_llvm = false,
+        //    .use_lld = false,
+        //    .optimize_mode = .ReleaseFast,
+        //    .strip = true,
+        //},
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .aarch64,
+        //        .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.neoverse_n1 },
+        //        .os_tag = .linux,
+        //        .abi = .none,
+        //    },
+        //    .use_llvm = false,
+        //    .use_lld = false,
+        //    .optimize_mode = .ReleaseFast,
+        //    .strip = true,
+        //},
 
         .{
             .target = .{
@@ -1186,12 +1187,12 @@ const test_targets = blk: {
             .use_lld = false,
         },
 
-        // macOS Targets
+        // Darwin Targets
 
         .{
             .target = .{
                 .cpu_arch = .aarch64,
-                .os_tag = .macos,
+                .os_tag = .maccatalyst,
                 .abi = .none,
             },
         },
@@ -1202,10 +1203,27 @@ const test_targets = blk: {
                 .os_tag = .macos,
                 .abi = .none,
             },
-            .use_llvm = false,
-            .use_lld = false,
-            .optimize_mode = .ReleaseFast,
-            .strip = true,
+        },
+
+        // Disabled due to https://codeberg.org/ziglang/zig/pulls/30232#issuecomment-9203351
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .aarch64,
+        //        .os_tag = .macos,
+        //        .abi = .none,
+        //    },
+        //    .use_llvm = false,
+        //    .use_lld = false,
+        //    .optimize_mode = .ReleaseFast,
+        //    .strip = true,
+        //},
+
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .os_tag = .maccatalyst,
+                .abi = .none,
+            },
         },
 
         .{
@@ -1348,6 +1366,89 @@ const test_targets = blk: {
             .link_libc = true,
         },
 
+        // OpenBSD Targets
+
+        .{
+            .target = .{
+                .cpu_arch = .aarch64,
+                .os_tag = .openbsd,
+                .abi = .none,
+            },
+            .link_libc = true,
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .arm,
+                .os_tag = .openbsd,
+                .abi = .eabi,
+            },
+            .link_libc = true,
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .mips64,
+                .os_tag = .openbsd,
+                .abi = .none,
+            },
+            .link_libc = true,
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .mips64el,
+                .os_tag = .openbsd,
+                .abi = .none,
+            },
+            .link_libc = true,
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .powerpc,
+                .os_tag = .openbsd,
+                .abi = .eabihf,
+            },
+            .link_libc = true,
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .powerpc64,
+                .os_tag = .openbsd,
+                .abi = .none,
+            },
+            .link_libc = true,
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .riscv64,
+                .os_tag = .openbsd,
+                .abi = .none,
+            },
+            .link_libc = true,
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .x86,
+                .os_tag = .openbsd,
+                .abi = .none,
+            },
+            .link_libc = true,
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .os_tag = .openbsd,
+                .abi = .none,
+            },
+            .link_libc = true,
+        },
+
         // SPIR-V Targets
 
         // Disabled due to no active maintainer (feel free to fix the failures
@@ -1365,18 +1466,16 @@ const test_targets = blk: {
 
         // WASI Targets
 
-        // Disabled due to no active maintainer (feel free to fix the failures
-        // and then re-enable at any time). The failures occur due to backend
-        // miscompilation of different AIR from the frontend.
-        //.{
-        //    .target = .{
-        //        .cpu_arch = .wasm32,
-        //        .os_tag = .wasi,
-        //        .abi = .none,
-        //    },
-        //    .use_llvm = false,
-        //    .use_lld = false,
-        //},
+        .{
+            .target = .{
+                .cpu_arch = .wasm32,
+                .os_tag = .wasi,
+                .abi = .none,
+            },
+            .skip_modules = &.{ "compiler-rt", "std" },
+            .use_llvm = false,
+            .use_lld = false,
+        },
         .{
             .target = .{
                 .cpu_arch = .wasm32,
@@ -1740,14 +1839,13 @@ const c_abi_targets = blk: {
             },
         },
 
-        // Clang explodes when parsing `cfuncs.c`.
-        // .{
-        //     .target = .{
-        //         .cpu_arch = .s390x,
-        //         .os_tag = .linux,
-        //         .abi = .musl,
-        //     },
-        // },
+        .{
+            .target = .{
+                .cpu_arch = .s390x,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+        },
 
         .{
             .target = std.Target.Query.parse(.{
@@ -2014,9 +2112,9 @@ pub fn addCliTests(b: *std.Build) *Step {
 
     {
         // Test `zig init`.
-        const tmp_path = b.makeTempPath();
+        const tmp_path = b.tmpPath();
         const init_exe = b.addSystemCommand(&.{ b.graph.zig_exe, "init" });
-        init_exe.setCwd(.{ .cwd_relative = tmp_path });
+        init_exe.setCwd(tmp_path);
         init_exe.setName("zig init");
         init_exe.expectStdOutEqual("");
         init_exe.expectStdErrEqual("info: created build.zig\n" ++
@@ -2037,31 +2135,28 @@ pub fn addCliTests(b: *std.Build) *Step {
         run_bad.step.dependOn(&init_exe.step);
 
         const run_test = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test" });
-        run_test.setCwd(.{ .cwd_relative = tmp_path });
+        run_test.setCwd(tmp_path);
         run_test.setName("zig build test");
         run_test.expectStdOutEqual("");
         run_test.step.dependOn(&init_exe.step);
 
         const run_run = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "run" });
-        run_run.setCwd(.{ .cwd_relative = tmp_path });
+        run_run.setCwd(tmp_path);
         run_run.setName("zig build run");
         run_run.expectStdOutEqual("Run `zig build test` to run the tests.\n");
-        run_run.expectStdErrEqual("All your codebase are belong to us.\n");
+        run_run.expectStdErrMatch("All your codebase are belong to us.\n");
         run_run.step.dependOn(&init_exe.step);
 
-        const cleanup = b.addRemoveDirTree(.{ .cwd_relative = tmp_path });
-        cleanup.step.dependOn(&run_test.step);
-        cleanup.step.dependOn(&run_run.step);
-        cleanup.step.dependOn(&run_bad.step);
-
-        step.dependOn(&cleanup.step);
+        step.dependOn(&run_test.step);
+        step.dependOn(&run_run.step);
+        step.dependOn(&run_bad.step);
     }
 
     {
         // Test `zig init -m`.
-        const tmp_path = b.makeTempPath();
+        const tmp_path = b.tmpPath();
         const init_exe = b.addSystemCommand(&.{ b.graph.zig_exe, "init", "-m" });
-        init_exe.setCwd(.{ .cwd_relative = tmp_path });
+        init_exe.setCwd(tmp_path);
         init_exe.setName("zig init -m");
         init_exe.expectStdOutEqual("");
         init_exe.expectStdErrEqual("info: successfully populated 'build.zig.zon' and 'build.zig'\n");
@@ -2069,7 +2164,7 @@ pub fn addCliTests(b: *std.Build) *Step {
 
     // Test Godbolt API
     if (builtin.os.tag == .linux and builtin.cpu.arch == .x86_64) {
-        const tmp_path = b.makeTempPath();
+        const tmp_path = b.tmpPath();
 
         const example_zig = b.addWriteFiles().add("example.zig",
             \\// Type your code here, or load an example.
@@ -2085,13 +2180,9 @@ pub fn addCliTests(b: *std.Build) *Step {
         );
 
         // This is intended to be the exact CLI usage used by godbolt.org.
-        const run = b.addSystemCommand(&.{
-            b.graph.zig_exe, "build-obj",
-            "--cache-dir",   tmp_path,
-            "--name",        "example",
-            "-fno-emit-bin", "-fno-emit-h",
-            "-fstrip",       "-OReleaseFast",
-        });
+        const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build-obj", "--cache-dir" });
+        run.addDirectoryArg(tmp_path);
+        run.addArgs(&.{ "--name", "example", "-fno-emit-bin", "-fno-emit-h", "-fstrip", "-OReleaseFast" });
         run.addFileArg(example_zig);
         const example_s = run.addPrefixedOutputFileArg("-femit-asm=", "example.s");
 
@@ -2104,10 +2195,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         });
         checkfile.setName("check godbolt.org CLI usage generating valid asm");
 
-        const cleanup = b.addRemoveDirTree(.{ .cwd_relative = tmp_path });
-        cleanup.step.dependOn(&checkfile.step);
-
-        step.dependOn(&cleanup.step);
+        step.dependOn(&checkfile.step);
     }
 
     {
@@ -2116,22 +2204,19 @@ pub fn addCliTests(b: *std.Build) *Step {
         // directory because this test will be mutating the files. The cache
         // system relies on cache directories being mutated only by their
         // owners.
-        const tmp_path = b.makeTempPath();
+        const tmp_wf = b.addTempFiles();
         const unformatted_code = "    // no reason for indent";
 
-        var dir = std.fs.cwd().openDir(tmp_path, .{}) catch @panic("unhandled");
-        defer dir.close();
-        dir.writeFile(.{ .sub_path = "fmt1.zig", .data = unformatted_code }) catch @panic("unhandled");
-        dir.writeFile(.{ .sub_path = "fmt2.zig", .data = unformatted_code }) catch @panic("unhandled");
-        dir.makeDir("subdir") catch @panic("unhandled");
-        var subdir = dir.openDir("subdir", .{}) catch @panic("unhandled");
-        defer subdir.close();
-        subdir.writeFile(.{ .sub_path = "fmt3.zig", .data = unformatted_code }) catch @panic("unhandled");
+        _ = tmp_wf.add("fmt1.zig", unformatted_code);
+        _ = tmp_wf.add("fmt2.zig", unformatted_code);
+        _ = tmp_wf.add("subdir/fmt3.zig", unformatted_code);
+
+        const tmp_path = tmp_wf.getDirectory();
 
         // Test zig fmt affecting only the appropriate files.
         const run1 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "fmt1.zig" });
         run1.setName("run zig fmt one file");
-        run1.setCwd(.{ .cwd_relative = tmp_path });
+        run1.setCwd(tmp_path);
         run1.has_side_effects = true;
         // stdout should be file path + \n
         run1.expectStdOutEqual("fmt1.zig\n");
@@ -2139,7 +2224,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         // Test excluding files and directories from a run
         const run2 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "--exclude", "fmt2.zig", "--exclude", "subdir", "." });
         run2.setName("run zig fmt on directory with exclusions");
-        run2.setCwd(.{ .cwd_relative = tmp_path });
+        run2.setCwd(tmp_path);
         run2.has_side_effects = true;
         run2.expectStdOutEqual("");
         run2.step.dependOn(&run1.step);
@@ -2147,7 +2232,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         // Test excluding non-existent file
         const run3 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "--exclude", "fmt2.zig", "--exclude", "nonexistent.zig", "." });
         run3.setName("run zig fmt on directory with non-existent exclusion");
-        run3.setCwd(.{ .cwd_relative = tmp_path });
+        run3.setCwd(tmp_path);
         run3.has_side_effects = true;
         run3.expectStdOutEqual("." ++ s ++ "subdir" ++ s ++ "fmt3.zig\n");
         run3.step.dependOn(&run2.step);
@@ -2155,7 +2240,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         // running it on the dir, only the new file should be changed
         const run4 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "." });
         run4.setName("run zig fmt the directory");
-        run4.setCwd(.{ .cwd_relative = tmp_path });
+        run4.setCwd(tmp_path);
         run4.has_side_effects = true;
         run4.expectStdOutEqual("." ++ s ++ "fmt2.zig\n");
         run4.step.dependOn(&run3.step);
@@ -2163,37 +2248,33 @@ pub fn addCliTests(b: *std.Build) *Step {
         // both files have been formatted, nothing should change now
         const run5 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "." });
         run5.setName("run zig fmt with nothing to do");
-        run5.setCwd(.{ .cwd_relative = tmp_path });
+        run5.setCwd(tmp_path);
         run5.has_side_effects = true;
         run5.expectStdOutEqual("");
         run5.step.dependOn(&run4.step);
 
         const unformatted_code_utf16 = "\xff\xfe \x00 \x00 \x00 \x00/\x00/\x00 \x00n\x00o\x00 \x00r\x00e\x00a\x00s\x00o\x00n\x00";
-        const fmt6_path = b.pathJoin(&.{ tmp_path, "fmt6.zig" });
-        const write6 = b.addUpdateSourceFiles();
-        write6.addBytesToSource(unformatted_code_utf16, fmt6_path);
+        const write6 = b.addMutateFiles(tmp_path);
+        const fmt6_path = write6.add("fmt6.zig", unformatted_code_utf16);
         write6.step.dependOn(&run5.step);
 
         // Test `zig fmt` handling UTF-16 decoding.
         const run6 = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "." });
         run6.setName("run zig fmt convert UTF-16 to UTF-8");
-        run6.setCwd(.{ .cwd_relative = tmp_path });
+        run6.setCwd(tmp_path);
         run6.has_side_effects = true;
         run6.expectStdOutEqual("." ++ s ++ "fmt6.zig\n");
         run6.step.dependOn(&write6.step);
 
         // TODO change this to an exact match
-        const check6 = b.addCheckFile(.{ .cwd_relative = fmt6_path }, .{
+        const check6 = b.addCheckFile(fmt6_path, .{
             .expected_matches = &.{
                 "// no reason",
             },
         });
         check6.step.dependOn(&run6.step);
 
-        const cleanup = b.addRemoveDirTree(.{ .cwd_relative = tmp_path });
-        cleanup.step.dependOn(&check6.step);
-
-        step.dependOn(&cleanup.step);
+        step.dependOn(&check6.step);
     }
 
     {
@@ -2231,10 +2312,13 @@ const ModuleTestOptions = struct {
     test_default_only: bool,
     skip_single_threaded: bool,
     skip_non_native: bool,
+    skip_spirv: bool,
+    skip_wasm: bool,
     skip_freebsd: bool,
     skip_netbsd: bool,
+    skip_openbsd: bool,
     skip_windows: bool,
-    skip_macos: bool,
+    skip_darwin: bool,
     skip_linux: bool,
     skip_llvm: bool,
     skip_libc: bool,
@@ -2261,23 +2345,39 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
             }
         }
 
+        const resolved_target = b.resolveTargetQuery(test_target.target);
+        const target = &resolved_target.result;
+
+        if (test_target.link_libc == false and target.requiresLibC()) continue;
+        // If the target requires libc, there's no point building the cases that
+        // don't explicitly link libc as they'll just end up actually linking
+        // libc anyway, thus creating duplicate work and making -Dskip-libc not
+        // work as expected.
+        if (test_target.link_libc == null and target.requiresLibC()) continue;
+        // These targets don't strictly require libc, but we don't yet have a
+        // syscall layer for them, so the compiler links libc by default. They
+        // therefore get the same treatment here.
+        if (test_target.link_libc == null and (target.os.tag == .freebsd or target.os.tag == .netbsd)) continue;
+
         if (!options.test_extra_targets and test_target.extra_target) continue;
 
         if (options.skip_non_native and !test_target.target.isNative())
             continue;
 
-        if (options.skip_freebsd and test_target.target.os_tag == .freebsd) continue;
-        if (options.skip_netbsd and test_target.target.os_tag == .netbsd) continue;
-        if (options.skip_windows and test_target.target.os_tag == .windows) continue;
-        if (options.skip_macos and test_target.target.os_tag == .macos) continue;
-        if (options.skip_linux and test_target.target.os_tag == .linux) continue;
+        if (options.skip_spirv and target.cpu.arch.isSpirV()) continue;
+        if (options.skip_wasm and target.cpu.arch.isWasm()) continue;
+
+        if (options.skip_freebsd and target.os.tag == .freebsd) continue;
+        if (options.skip_netbsd and target.os.tag == .netbsd) continue;
+        if (options.skip_openbsd and target.os.tag == .openbsd) continue;
+        if (options.skip_windows and target.os.tag == .windows) continue;
+        if (options.skip_darwin and target.os.tag.isDarwin()) continue;
+        if (options.skip_linux and target.os.tag == .linux) continue;
 
         const would_use_llvm = wouldUseLlvm(test_target.use_llvm, test_target.target, test_target.optimize_mode);
         if (options.skip_llvm and would_use_llvm) continue;
 
-        const resolved_target = b.resolveTargetQuery(test_target.target);
         const triple_txt = resolved_target.query.zigTriple(b.allocator) catch @panic("OOM");
-        const target = &resolved_target.result;
 
         if (options.test_target_filters.len > 0) {
             for (options.test_target_filters) |filter| {
@@ -2324,8 +2424,11 @@ fn addOneModuleTest(
     const libc_suffix = if (test_target.link_libc == true) "-libc" else "";
     const model_txt = target.cpu.model.name;
 
-    // wasm32-wasi builds need more RAM, idk why
-    const max_rss = if (target.os.tag == .wasi)
+    // These emulated targets need a lot more RAM for unknown reasons.
+    const max_rss = if (mem.eql(u8, options.name, "std") and
+        (target.cpu.arch == .hexagon or
+            (target.cpu.arch.isRISCV() and !resolved_target.query.isNative()) or
+            target.cpu.arch.isWasm()))
         options.max_rss * 2
     else
         options.max_rss;
@@ -2484,6 +2587,7 @@ fn addOneModuleTest(
 }
 
 pub fn wouldUseLlvm(use_llvm: ?bool, query: std.Target.Query, optimize_mode: OptimizeMode) bool {
+    if (comptime builtin.cpu.arch.endian() == .big) return true; // https://github.com/ziglang/zig/issues/25961
     if (use_llvm) |x| return x;
     if (query.ofmt == .c) return false;
     switch (optimize_mode) {
@@ -2503,13 +2607,16 @@ pub fn wouldUseLlvm(use_llvm: ?bool, query: std.Target.Query, optimize_mode: Opt
 const CAbiTestOptions = struct {
     test_target_filters: []const []const u8,
     skip_non_native: bool,
+    skip_wasm: bool,
     skip_freebsd: bool,
     skip_netbsd: bool,
+    skip_openbsd: bool,
     skip_windows: bool,
-    skip_macos: bool,
+    skip_darwin: bool,
     skip_linux: bool,
     skip_llvm: bool,
     skip_release: bool,
+    max_rss: usize = 0,
 };
 
 pub fn addCAbiTests(b: *std.Build, options: CAbiTestOptions) *Step {
@@ -2522,10 +2629,14 @@ pub fn addCAbiTests(b: *std.Build, options: CAbiTestOptions) *Step {
 
         for (c_abi_targets) |c_abi_target| {
             if (options.skip_non_native and !c_abi_target.target.isNative()) continue;
+
+            if (options.skip_wasm and c_abi_target.target.cpu_arch != null and c_abi_target.target.cpu_arch.?.isWasm()) continue;
+
             if (options.skip_freebsd and c_abi_target.target.os_tag == .freebsd) continue;
             if (options.skip_netbsd and c_abi_target.target.os_tag == .netbsd) continue;
+            if (options.skip_openbsd and c_abi_target.target.os_tag == .openbsd) continue;
             if (options.skip_windows and c_abi_target.target.os_tag == .windows) continue;
-            if (options.skip_macos and c_abi_target.target.os_tag == .macos) continue;
+            if (options.skip_darwin and c_abi_target.target.os_tag != null and c_abi_target.target.os_tag.?.isDarwin()) continue;
             if (options.skip_linux and c_abi_target.target.os_tag == .linux) continue;
 
             const would_use_llvm = wouldUseLlvm(c_abi_target.use_llvm, c_abi_target.target, .Debug);
@@ -2579,6 +2690,7 @@ pub fn addCAbiTests(b: *std.Build, options: CAbiTestOptions) *Step {
                 .root_module = test_mod,
                 .use_llvm = c_abi_target.use_llvm,
                 .use_lld = c_abi_target.use_lld,
+                .max_rss = options.max_rss,
             });
 
             // This test is intentionally trying to check if the external ABI is
@@ -2601,11 +2713,12 @@ pub fn addCases(
 ) !void {
     const arena = b.allocator;
     const gpa = b.allocator;
+    const io = b.graph.io;
 
-    var cases = @import("src/Cases.zig").init(gpa, arena);
+    var cases = @import("src/Cases.zig").init(gpa, arena, io);
 
-    var dir = try b.build_root.handle.openDir("test/cases", .{ .iterate = true });
-    defer dir.close();
+    var dir = try b.build_root.handle.openDir(io, "test/cases", .{ .iterate = true });
+    defer dir.close(io);
 
     cases.addFromDir(dir, b);
     try @import("cases.zig").addCases(&cases, build_options, b);
@@ -2650,7 +2763,9 @@ pub fn addDebuggerTests(b: *std.Build, options: DebuggerContext.Options) ?*Step 
     return step;
 }
 
-pub fn addIncrementalTests(b: *std.Build, test_step: *Step) !void {
+pub fn addIncrementalTests(b: *std.Build, test_step: *Step, test_filters: []const []const u8) !void {
+    const io = b.graph.io;
+
     const incr_check = b.addExecutable(.{
         .name = "incr-check",
         .root_module = b.createModule(.{
@@ -2660,12 +2775,17 @@ pub fn addIncrementalTests(b: *std.Build, test_step: *Step) !void {
         }),
     });
 
-    var dir = try b.build_root.handle.openDir("test/incremental", .{ .iterate = true });
-    defer dir.close();
+    var dir = try b.build_root.handle.openDir(io, "test/incremental", .{ .iterate = true });
+    defer dir.close(io);
 
     var it = try dir.walk(b.graph.arena);
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
+        if (std.mem.endsWith(u8, entry.basename, ".swp")) continue;
+
+        for (test_filters) |test_filter| {
+            if (std.mem.indexOf(u8, entry.path, test_filter)) |_| break;
+        } else if (test_filters.len > 0) continue;
 
         const run = b.addRunArtifact(incr_check);
         run.setName(b.fmt("incr-check '{s}'", .{entry.basename}));
@@ -2674,7 +2794,12 @@ pub fn addIncrementalTests(b: *std.Build, test_step: *Step) !void {
         run.addFileArg(b.path("test/incremental/").path(b, entry.path));
         run.addArgs(&.{ "--zig-lib-dir", b.fmt("{f}", .{b.graph.zig_lib_directory}) });
 
-        run.addCheck(.{ .expect_term = .{ .Exited = 0 } });
+        if (b.enable_qemu) run.addArg("-fqemu");
+        if (b.enable_wine) run.addArg("-fwine");
+        if (b.enable_wasmtime) run.addArg("-fwasmtime");
+        if (b.enable_darling) run.addArg("-fdarling");
+
+        run.addCheck(.{ .expect_term = .{ .exited = 0 } });
 
         test_step.dependOn(&run.step);
     }
@@ -2760,11 +2885,12 @@ const libc_targets: []const std.Target.Query = &.{
         .os_tag = .linux,
         .abi = .musl,
     },
-    .{
-        .cpu_arch = .loongarch64,
-        .os_tag = .linux,
-        .abi = .muslsf,
-    },
+    // Macros like FE_INVALID are defined by musl, but they shouldn't.
+    // .{
+    //     .cpu_arch = .loongarch64,
+    //     .os_tag = .linux,
+    //     .abi = .muslsf,
+    // },
     // .{
     //     .cpu_arch = .mips,
     //     .os_tag = .linux,

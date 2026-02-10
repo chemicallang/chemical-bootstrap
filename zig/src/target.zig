@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -14,13 +15,6 @@ pub fn cannotDynamicLink(target: *const std.Target) bool {
         .freestanding => true,
         else => target.cpu.arch.isSpirV(),
     };
-}
-
-/// On Darwin, we always link libSystem which contains libc.
-/// Similarly on FreeBSD and NetBSD we always link system libc
-/// since this is the stable syscall interface.
-pub fn osRequiresLibC(target: *const std.Target) bool {
-    return target.requiresLibC();
 }
 
 pub fn libCNeedsLibUnwind(target: *const std.Target, link_mode: std.builtin.LinkMode) bool {
@@ -48,7 +42,7 @@ pub fn libCxxNeedsLibUnwind(target: *const std.Target) bool {
 pub fn requiresPIC(target: *const std.Target, linking_libc: bool) bool {
     return target.abi.isAndroid() or
         target.os.tag == .windows or target.os.tag == .uefi or
-        osRequiresLibC(target) or
+        target.requiresLibC() or
         (linking_libc and target.isGnuLibC());
 }
 
@@ -255,6 +249,7 @@ pub fn hasNewLinkerSupport(ofmt: std.Target.ObjectFormat, backend: std.builtin.C
 /// debug mode. A given target should only return true here if it is passing greater
 /// than or equal to the number of behavior tests as the respective LLVM backend.
 pub fn selfHostedBackendIsAsRobustAsLlvm(target: *const std.Target) bool {
+    if (comptime builtin.cpu.arch.endian() == .big) return false; // https://github.com/ziglang/zig/issues/25961
     if (target.cpu.arch.isSpirV()) return true;
     if (target.cpu.arch == .x86_64 and target.ptrBitWidth() == 64) {
         if (target.os.tag == .illumos) {

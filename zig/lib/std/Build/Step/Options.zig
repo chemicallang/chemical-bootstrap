@@ -1,19 +1,20 @@
-const std = @import("std");
+const Options = @This();
 const builtin = @import("builtin");
+
+const std = @import("std");
+const Io = std.Io;
 const fs = std.fs;
 const Step = std.Build.Step;
 const GeneratedFile = std.Build.GeneratedFile;
 const LazyPath = std.Build.LazyPath;
-
-const Options = @This();
 
 pub const base_id: Step.Id = .options;
 
 step: Step,
 generated_file: GeneratedFile,
 
-contents: std.ArrayListUnmanaged(u8),
-args: std.ArrayListUnmanaged(Arg),
+contents: std.ArrayList(u8),
+args: std.ArrayList(Arg),
 encountered_types: std.StringHashMapUnmanaged(void),
 
 pub fn create(owner: *std.Build) *Options {
@@ -45,7 +46,7 @@ fn addOptionFallible(options: *Options, comptime T: type, name: []const u8, valu
 
 fn printType(
     options: *Options,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     comptime T: type,
     value: T,
     indent: u8,
@@ -230,6 +231,7 @@ fn printType(
         .int,
         .comptime_int,
         .float,
+        .comptime_float,
         .null,
         => {
             if (name) |some| {
@@ -267,7 +269,7 @@ fn printType(
     }
 }
 
-fn printUserDefinedType(options: *Options, out: *std.ArrayListUnmanaged(u8), comptime T: type, indent: u8) !void {
+fn printUserDefinedType(options: *Options, out: *std.ArrayList(u8), comptime T: type, indent: u8) !void {
     switch (@typeInfo(T)) {
         .@"enum" => |info| {
             return try printEnum(options, out, T, info, indent);
@@ -281,7 +283,7 @@ fn printUserDefinedType(options: *Options, out: *std.ArrayListUnmanaged(u8), com
 
 fn printEnum(
     options: *Options,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     comptime T: type,
     comptime val: std.builtin.Type.Enum,
     indent: u8,
@@ -309,7 +311,7 @@ fn printEnum(
     try out.appendSlice(gpa, "};\n");
 }
 
-fn printStruct(options: *Options, out: *std.ArrayListUnmanaged(u8), comptime T: type, comptime val: std.builtin.Type.Struct, indent: u8) !void {
+fn printStruct(options: *Options, out: *std.ArrayList(u8), comptime T: type, comptime val: std.builtin.Type.Struct, indent: u8) !void {
     const gpa = options.step.owner.allocator;
     const gop = try options.encountered_types.getOrPut(gpa, @typeName(T));
     if (gop.found_existing) return;
@@ -369,7 +371,7 @@ fn printStruct(options: *Options, out: *std.ArrayListUnmanaged(u8), comptime T: 
 
 fn printStructValue(
     options: *Options,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     comptime struct_val: std.builtin.Type.Struct,
     val: anytype,
     indent: u8,
@@ -440,6 +442,7 @@ fn make(step: *Step, make_options: Step.MakeOptions) !void {
     _ = make_options;
 
     const b = step.owner;
+    const io = b.graph.io;
     const options: *Options = @fieldParentPtr("step", step);
 
     for (options.args.items) |item| {
@@ -467,59 +470,38 @@ fn make(step: *Step, make_options: Step.MakeOptions) !void {
 
     // Optimize for the hot path. Stat the file, and if it already exists,
     // cache hit.
-    if (b.cache_root.handle.access(sub_path, .{})) |_| {
+    if (b.cache_root.handle.access(io, sub_path, .{})) |_| {
         // This is the hot path, success.
         step.result_cached = true;
         return;
     } else |outer_err| switch (outer_err) {
         error.FileNotFound => {
-            const sub_dirname = fs.path.dirname(sub_path).?;
-            b.cache_root.handle.makePath(sub_dirname) catch |e| {
-                return step.fail("unable to make path '{f}{s}': {s}", .{
-                    b.cache_root, sub_dirname, @errorName(e),
+            var atomic_file = b.cache_root.handle.createFileAtomic(io, sub_path, .{
+                .replace = false,
+                .make_path = true,
+            }) catch |err| return step.fail("failed to create temporary path for '{f}{s}': {t}", .{
+                b.cache_root, sub_path, err,
+            });
+            defer atomic_file.deinit(io);
+
+            atomic_file.file.writeStreamingAll(io, options.contents.items) catch |err| {
+                return step.fail("failed to write options to temporary path for '{f}{s}': {t}", .{
+                    b.cache_root, sub_path, err,
                 });
             };
 
-            const rand_int = std.crypto.random.int(u64);
-            const tmp_sub_path = "tmp" ++ fs.path.sep_str ++
-                std.fmt.hex(rand_int) ++ fs.path.sep_str ++
-                basename;
-            const tmp_sub_path_dirname = fs.path.dirname(tmp_sub_path).?;
-
-            b.cache_root.handle.makePath(tmp_sub_path_dirname) catch |err| {
-                return step.fail("unable to make temporary directory '{f}{s}': {s}", .{
-                    b.cache_root, tmp_sub_path_dirname, @errorName(err),
-                });
-            };
-
-            b.cache_root.handle.writeFile(.{ .sub_path = tmp_sub_path, .data = options.contents.items }) catch |err| {
-                return step.fail("unable to write options to '{f}{s}': {s}", .{
-                    b.cache_root, tmp_sub_path, @errorName(err),
-                });
-            };
-
-            b.cache_root.handle.rename(tmp_sub_path, sub_path) catch |err| switch (err) {
+            atomic_file.link(io) catch |err| switch (err) {
                 error.PathAlreadyExists => {
-                    // Other process beat us to it. Clean up the temp file.
-                    b.cache_root.handle.deleteFile(tmp_sub_path) catch |e| {
-                        try step.addError("warning: unable to delete temp file '{f}{s}': {s}", .{
-                            b.cache_root, tmp_sub_path, @errorName(e),
-                        });
-                    };
                     step.result_cached = true;
                     return;
                 },
-                else => {
-                    return step.fail("unable to rename options from '{f}{s}' to '{f}{s}': {s}", .{
-                        b.cache_root,    tmp_sub_path,
-                        b.cache_root,    sub_path,
-                        @errorName(err),
-                    });
-                },
+                else => return step.fail("failed to link temporary file into '{f}{s}': {t}", .{
+                    b.cache_root, sub_path, err,
+                }),
             };
         },
-        else => |e| return step.fail("unable to access options file '{f}{s}': {s}", .{
-            b.cache_root, sub_path, @errorName(e),
+        else => |e| return step.fail("unable to access options file '{f}{s}': {t}", .{
+            b.cache_root, sub_path, e,
         }),
     }
 }
@@ -537,17 +519,21 @@ test Options {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
+    const cwd = try std.process.getCwdAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
     var graph: std.Build.Graph = .{
         .io = io,
         .arena = arena.allocator(),
         .cache = .{
             .io = io,
             .gpa = arena.allocator(),
-            .manifest_dir = std.fs.cwd(),
+            .manifest_dir = Io.Dir.cwd(),
+            .cwd = cwd,
         },
         .zig_exe = "test",
-        .env_map = std.process.EnvMap.init(arena.allocator()),
-        .global_cache_root = .{ .path = "test", .handle = std.fs.cwd() },
+        .environ_map = std.process.Environ.Map.init(arena.allocator()),
+        .global_cache_root = .{ .path = "test", .handle = Io.Dir.cwd() },
         .host = .{
             .query = .{},
             .result = try std.zig.system.resolveTargetQuery(io, .{}),
@@ -558,8 +544,8 @@ test Options {
 
     var builder = try std.Build.create(
         &graph,
-        .{ .path = "test", .handle = std.fs.cwd() },
-        .{ .path = "test", .handle = std.fs.cwd() },
+        .{ .path = "test", .handle = Io.Dir.cwd() },
+        .{ .path = "test", .handle = Io.Dir.cwd() },
         &.{},
     );
 
@@ -594,6 +580,7 @@ test Options {
     options.addOption(?usize, "option2", null);
     options.addOption(?usize, "option3", 3);
     options.addOption(comptime_int, "option4", 4);
+    options.addOption(comptime_float, "option5", 5.01);
     options.addOption([]const u8, "string", "zigisthebest");
     options.addOption(?[]const u8, "optional_string", null);
     options.addOption([2][2]u16, "nested_array", nested_array);
@@ -618,6 +605,7 @@ test Options {
         \\pub const option2: ?usize = null;
         \\pub const option3: ?usize = 3;
         \\pub const option4: comptime_int = 4;
+        \\pub const option5: comptime_float = 5.01;
         \\pub const string: []const u8 = "zigisthebest";
         \\pub const optional_string: ?[]const u8 = null;
         \\pub const nested_array: [2][2]u16 = [2][2]u16 {

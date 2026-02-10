@@ -157,6 +157,59 @@ test "@floatFromInt(f80)" {
     try comptime S.doTheTest(i256);
 }
 
+test "type coercion from int to float" {
+    const check = struct {
+        // Check that an integer value can be coerced to a float type and
+        // then converted back to the original value without rounding issues.
+        fn value(Float: type, int: anytype) !void {
+            const float: Float = int;
+            const Int = @TypeOf(int);
+            try std.testing.expectEqual(int, @as(Int, @intFromFloat(float)));
+            try std.testing.expectEqual(int, @as(Int, @intFromFloat(@ceil(float))));
+            try std.testing.expectEqual(int, @as(Int, @intFromFloat(@floor(float))));
+        }
+
+        // Exhaustively check that all possible values of the integer type can
+        // safely be coerced to the float type.
+        fn allValues(Float: type, Int: type) !void {
+            var int: Int = std.math.minInt(Int);
+            while (int < std.math.maxInt(Int)) : (int += 1)
+                try value(Float, int);
+        }
+
+        // Check that the min and max values of the integer type can safely be
+        // coerced to the float type.
+        fn edgeValues(Float: type, Int: type) !void {
+            var int: Int = std.math.minInt(Int);
+            try value(Float, int);
+            int = std.math.maxInt(Int);
+            try value(Float, int);
+        }
+    };
+
+    try check.allValues(f16, u11);
+    try check.allValues(f16, i12);
+
+    try check.edgeValues(f32, u24);
+    try check.edgeValues(f32, i25);
+
+    try check.edgeValues(f64, u53);
+    try check.edgeValues(f64, i54);
+
+    try check.edgeValues(f80, u64);
+    try check.edgeValues(f80, i65);
+
+    try check.edgeValues(f128, u113);
+    try check.edgeValues(f128, i114);
+
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+
+    // Basic sanity check that the coercions work for vectors too.
+    const int_vec: @Vector(2, u24) = @splat(123);
+    try check.value(@Vector(2, f32), int_vec);
+}
+
 test "@intFromFloat" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
@@ -2446,9 +2499,14 @@ test "peer type resolution: pointer attributes are combined correctly" {
     };
 
     const NonAllowZero = comptime blk: {
-        var ti = @typeInfo(@TypeOf(r1, r2, r3, r4));
-        ti.pointer.is_allowzero = false;
-        break :blk @Type(ti);
+        const ptr = @typeInfo(@TypeOf(r1, r2, r3, r4)).pointer;
+        break :blk @Pointer(ptr.size, .{
+            .@"const" = ptr.is_const,
+            .@"volatile" = ptr.is_volatile,
+            .@"allowzero" = false,
+            .@"align" = ptr.alignment,
+            .@"addrspace" = ptr.address_space,
+        }, ptr.child, ptr.sentinel());
     };
     try expectEqualSlices(u8, std.mem.span(@volatileCast(@as(NonAllowZero, @ptrCast(r1)))), "foo");
     try expectEqualSlices(u8, std.mem.span(@volatileCast(@as(NonAllowZero, @ptrCast(r2)))), "bar");

@@ -29,7 +29,6 @@ dependants: ArrayList(*Step),
 /// retain previous value, or update.
 inputs: Inputs,
 
-state: State,
 /// Set this field to declare an upper bound on the amount of bytes of memory it will
 /// take to run the step. Zero means no limit.
 ///
@@ -50,6 +49,9 @@ state: State,
 /// runner. This value is configurable on the command line, and defaults to the
 /// total system memory available.
 max_rss: usize,
+
+state: State,
+pending_deps: u32,
 
 result_error_msgs: ArrayList([]const u8),
 result_error_bundle: std.zig.ErrorBundle,
@@ -110,15 +112,8 @@ pub const TestResults = struct {
 
 pub const MakeOptions = struct {
     progress_node: std.Progress.Node,
-    thread_pool: *std.Thread.Pool,
     watch: bool,
-    web_server: switch (builtin.target.cpu.arch) {
-        else => ?*Build.WebServer,
-        // WASM code references `Build.abi` which happens to incidentally reference this type, but
-        // it currently breaks because `std.net.Address` doesn't work there. Work around for now.
-        .wasm32 => void,
-    },
-    ttyconf: std.Io.tty.Config,
+    web_server: ?*Build.WebServer,
     /// If set, this is a timeout to enforce on all individual unit tests, in nanoseconds.
     unit_test_timeout_ns: ?u64,
     /// Not to be confused with `Build.allocator`, which is an alias of `Build.graph.arena`.
@@ -136,7 +131,6 @@ pub const State = enum {
     /// file system inputs have been modified, meaning that the step needs to
     /// be re-evaluated.
     precheck_done,
-    running,
     dependency_failure,
     success,
     failure,
@@ -175,7 +169,6 @@ pub const Id = enum {
             .install_artifact => InstallArtifact,
             .install_file => InstallFile,
             .install_dir => InstallDir,
-            .remove_dir => RemoveDir,
             .fail => Fail,
             .fmt => Fmt,
             .translate_c => TranslateC,
@@ -203,7 +196,6 @@ pub const InstallFile = @import("Step/InstallFile.zig");
 pub const ObjCopy = @import("Step/ObjCopy.zig");
 pub const Compile = @import("Step/Compile.zig");
 pub const Options = @import("Step/Options.zig");
-pub const RemoveDir = @import("Step/RemoveDir.zig");
 pub const Run = @import("Step/Run.zig");
 pub const TranslateC = @import("Step/TranslateC.zig");
 pub const WriteFile = @import("Step/WriteFile.zig");
@@ -251,6 +243,7 @@ pub fn init(options: StepOptions) Step {
         .dependants = .empty,
         .inputs = Inputs.init,
         .state = .precheck_unstarted,
+        .pending_deps = undefined, // initialized by build runner
         .max_rss = options.max_rss,
         .debug_stack_trace = blk: {
             const addr_buf = arena.alloc(usize, options.owner.debug_stack_frames_count) catch @panic("OOM");
@@ -330,16 +323,17 @@ pub fn cast(step: *Step, comptime T: type) ?*T {
 }
 
 /// For debugging purposes, prints identifying information about this Step.
-pub fn dump(step: *Step, w: *Io.Writer, tty_config: Io.tty.Config) void {
+pub fn dump(step: *Step, t: Io.Terminal) void {
+    const w = t.writer;
     if (step.debug_stack_trace.instruction_addresses.len > 0) {
         w.print("name: '{s}'. creation stack trace:\n", .{step.name}) catch {};
-        std.debug.writeStackTrace(&step.debug_stack_trace, w, tty_config) catch {};
+        std.debug.writeStackTrace(&step.debug_stack_trace, t) catch {};
     } else {
         const field = "debug_stack_frames_count";
         comptime assert(@hasField(Build, field));
-        tty_config.setColor(w, .yellow) catch {};
+        t.setColor(.yellow) catch {};
         w.print("name: '{s}'. no stack trace collected for this step, see std.Build." ++ field ++ "\n", .{step.name}) catch {};
-        tty_config.setColor(w, .reset) catch {};
+        t.setColor(.reset) catch {};
     }
 }
 
@@ -349,21 +343,23 @@ pub fn captureChildProcess(
     gpa: Allocator,
     progress_node: std.Progress.Node,
     argv: []const []const u8,
-) !std.process.Child.RunResult {
-    const arena = s.owner.allocator;
+) !std.process.RunResult {
+    const graph = s.owner.graph;
+    const arena = graph.arena;
+    const io = graph.io;
 
     // If an error occurs, it's happened in this command:
     assert(s.result_failed_command == null);
-    s.result_failed_command = try allocPrintCmd(gpa, null, argv);
+    s.result_failed_command = try allocPrintCmd(gpa, null, null, argv);
 
     try handleChildProcUnsupported(s);
     try handleVerbose(s.owner, null, argv);
 
-    const result = std.process.Child.run(.{
-        .allocator = arena,
+    const result = std.process.run(arena, io, .{
         .argv = argv,
+        .environ_map = &graph.environ_map,
         .progress_node = progress_node,
-    }) catch |err| return s.fail("failed to run {s}: {s}", .{ argv[0], @errorName(err) });
+    }) catch |err| return s.fail("failed to run {s}: {t}", .{ argv[0], err });
 
     if (result.stderr.len > 0) {
         try s.result_error_msgs.append(arena, result.stderr);
@@ -402,9 +398,12 @@ pub fn evalZigProcess(
     web_server: ?*Build.WebServer,
     gpa: Allocator,
 ) !?Path {
+    const b = s.owner;
+    const io = b.graph.io;
+
     // If an error occurs, it's happened in this command:
     assert(s.result_failed_command == null);
-    s.result_failed_command = try allocPrintCmd(gpa, null, argv);
+    s.result_failed_command = try allocPrintCmd(gpa, null, null, argv);
 
     if (s.getZigProcess()) |zp| update: {
         assert(watch);
@@ -412,8 +411,8 @@ pub fn evalZigProcess(
         const result = zigProcessUpdate(s, zp, watch, web_server, gpa) catch |err| switch (err) {
             error.BrokenPipe => {
                 // Process restart required.
-                const term = zp.child.wait() catch |e| {
-                    return s.fail("unable to wait for {s}: {s}", .{ argv[0], @errorName(e) });
+                const term = zp.child.wait(io) catch |e| {
+                    return s.fail("unable to wait for {s}: {t}", .{ argv[0], e });
                 };
                 _ = term;
                 s.clearZigProcess(gpa);
@@ -428,8 +427,8 @@ pub fn evalZigProcess(
 
         if (s.result_error_msgs.items.len > 0 and result == null) {
             // Crash detected.
-            const term = zp.child.wait() catch |e| {
-                return s.fail("unable to wait for {s}: {s}", .{ argv[0], @errorName(e) });
+            const term = zp.child.wait(io) catch |e| {
+                return s.fail("unable to wait for {s}: {t}", .{ argv[0], e });
             };
             s.result_peak_rss = zp.child.resource_usage_statistics.getMaxRss() orelse 0;
             s.clearZigProcess(gpa);
@@ -440,54 +439,50 @@ pub fn evalZigProcess(
         return result;
     }
     assert(argv.len != 0);
-    const b = s.owner;
-    const arena = b.allocator;
 
     try handleChildProcUnsupported(s);
     try handleVerbose(s.owner, null, argv);
 
-    var child = std.process.Child.init(argv, arena);
-    child.env_map = &b.graph.env_map;
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    child.request_resource_usage_statistics = true;
-    child.progress_node = prog_node;
-
-    child.spawn() catch |err| return s.fail("failed to spawn zig compiler {s}: {s}", .{
-        argv[0], @errorName(err),
-    });
-
     const zp = try gpa.create(ZigProcess);
+    defer if (!watch) gpa.destroy(zp);
+
+    zp.child = std.process.spawn(io, .{
+        .argv = argv,
+        .environ_map = &b.graph.environ_map,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .request_resource_usage_statistics = true,
+        .progress_node = prog_node,
+    }) catch |err| return s.fail("failed to spawn zig compiler {s}: {t}", .{ argv[0], err });
+    defer if (!watch) zp.child.kill(io);
+
     zp.* = .{
-        .child = child,
+        .child = zp.child,
         .poller = Io.poll(gpa, ZigProcess.StreamEnum, .{
-            .stdout = child.stdout.?,
-            .stderr = child.stderr.?,
+            .stdout = zp.child.stdout.?,
+            .stderr = zp.child.stderr.?,
         }),
-        .progress_ipc_fd = if (std.Progress.have_ipc) child.progress_node.getIpcFd() else {},
+        .progress_ipc_fd = if (std.Progress.have_ipc) prog_node.getIpcFd() else {},
     };
     if (watch) s.setZigProcess(zp);
-    defer if (!watch) {
-        zp.poller.deinit();
-        gpa.destroy(zp);
-    };
+    defer if (!watch) zp.poller.deinit();
 
     const result = try zigProcessUpdate(s, zp, watch, web_server, gpa);
 
     if (!watch) {
         // Send EOF to stdin.
-        zp.child.stdin.?.close();
+        zp.child.stdin.?.close(io);
         zp.child.stdin = null;
 
-        const term = zp.child.wait() catch |err| {
-            return s.fail("unable to wait for {s}: {s}", .{ argv[0], @errorName(err) });
+        const term = zp.child.wait(io) catch |err| {
+            return s.fail("unable to wait for {s}: {t}", .{ argv[0], err });
         };
         s.result_peak_rss = zp.child.resource_usage_statistics.getMaxRss() orelse 0;
 
         // Special handling for Compile step that is expecting compile errors.
         if (s.cast(Compile)) |compile| switch (term) {
-            .Exited => {
+            .exited => {
                 // Note that the exit code may be 0 in this case due to the
                 // compiler server protocol.
                 if (compile.expect_errors != null) {
@@ -507,38 +502,34 @@ pub fn evalZigProcess(
     return result;
 }
 
-/// Wrapper around `std.fs.Dir.updateFile` that handles verbose and error output.
+/// Wrapper around `Io.Dir.updateFile` that handles verbose and error output.
 pub fn installFile(s: *Step, src_lazy_path: Build.LazyPath, dest_path: []const u8) !Io.Dir.PrevStatus {
     const b = s.owner;
     const io = b.graph.io;
     const src_path = src_lazy_path.getPath3(b, s);
     try handleVerbose(b, null, &.{ "install", "-C", b.fmt("{f}", .{src_path}), dest_path });
-    return Io.Dir.updateFile(src_path.root_dir.handle.adaptToNewApi(), io, src_path.sub_path, .cwd(), dest_path, .{}) catch |err| {
-        return s.fail("unable to update file from '{f}' to '{s}': {s}", .{
-            src_path, dest_path, @errorName(err),
-        });
-    };
+    return Io.Dir.updateFile(src_path.root_dir.handle, io, src_path.sub_path, .cwd(), dest_path, .{}) catch |err|
+        return s.fail("unable to update file from '{f}' to '{s}': {t}", .{ src_path, dest_path, err });
 }
 
-/// Wrapper around `std.fs.Dir.makePathStatus` that handles verbose and error output.
-pub fn installDir(s: *Step, dest_path: []const u8) !std.fs.Dir.MakePathStatus {
+/// Wrapper around `Io.Dir.createDirPathStatus` that handles verbose and error output.
+pub fn installDir(s: *Step, dest_path: []const u8) !Io.Dir.CreatePathStatus {
     const b = s.owner;
+    const io = b.graph.io;
     try handleVerbose(b, null, &.{ "install", "-d", dest_path });
-    return std.fs.cwd().makePathStatus(dest_path) catch |err| {
-        return s.fail("unable to create dir '{s}': {s}", .{
-            dest_path, @errorName(err),
-        });
-    };
+    return Io.Dir.cwd().createDirPathStatus(io, dest_path, .default_dir) catch |err|
+        return s.fail("unable to create dir '{s}': {t}", .{ dest_path, err });
 }
 
 fn zigProcessUpdate(s: *Step, zp: *ZigProcess, watch: bool, web_server: ?*Build.WebServer, gpa: Allocator) !?Path {
     const b = s.owner;
     const arena = b.allocator;
+    const io = b.graph.io;
 
     var timer = try std.time.Timer.start();
 
-    try sendMessage(zp.child.stdin.?, .update);
-    if (!watch) try sendMessage(zp.child.stdin.?, .exit);
+    try sendMessage(io, zp.child.stdin.?, .update);
+    if (!watch) try sendMessage(io, zp.child.stdin.?, .exit);
 
     var result: ?Path = null;
 
@@ -675,12 +666,15 @@ fn clearZigProcess(s: *Step, gpa: Allocator) void {
     }
 }
 
-fn sendMessage(file: std.fs.File, tag: std.zig.Client.Message.Tag) !void {
+fn sendMessage(io: Io, file: Io.File, tag: std.zig.Client.Message.Tag) !void {
     const header: std.zig.Client.Message.Header = .{
         .tag = tag,
         .bytes_len = 0,
     };
-    try file.writeAll(std.mem.asBytes(&header));
+    var w = file.writer(io, &.{});
+    w.interface.writeStruct(header, .little) catch |err| switch (err) {
+        error.WriteFailed => return w.err.?,
+    };
 }
 
 pub fn handleVerbose(
@@ -694,13 +688,17 @@ pub fn handleVerbose(
 pub fn handleVerbose2(
     b: *Build,
     opt_cwd: ?[]const u8,
-    opt_env: ?*const std.process.EnvMap,
+    opt_env: ?*const std.process.Environ.Map,
     argv: []const []const u8,
 ) error{OutOfMemory}!void {
     if (b.verbose) {
+        const graph = b.graph;
         // Intention of verbose is to print all sub-process command lines to
         // stderr before spawning them.
-        const text = try allocPrintCmd2(b.allocator, opt_cwd, opt_env, argv);
+        const text = try allocPrintCmd(b.allocator, opt_cwd, if (opt_env) |env| .{
+            .child = env,
+            .parent = &graph.environ_map,
+        } else null, argv);
         std.debug.print("{s}\n", .{text});
     }
 }
@@ -716,12 +714,15 @@ pub inline fn handleChildProcUnsupported(s: *Step) error{ OutOfMemory, MakeFaile
 pub fn handleChildProcessTerm(s: *Step, term: std.process.Child.Term) error{ MakeFailed, OutOfMemory }!void {
     assert(s.result_failed_command != null);
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 return s.fail("process exited with error code {d}", .{code});
             }
         },
-        .Signal, .Stopped, .Unknown => {
+        .signal => |sig| {
+            return s.fail("process terminated with signal {t}", .{sig});
+        },
+        .stopped, .unknown => {
             return s.fail("process terminated unexpectedly", .{});
         },
     }
@@ -730,15 +731,10 @@ pub fn handleChildProcessTerm(s: *Step, term: std.process.Child.Term) error{ Mak
 pub fn allocPrintCmd(
     gpa: Allocator,
     opt_cwd: ?[]const u8,
-    argv: []const []const u8,
-) Allocator.Error![]u8 {
-    return allocPrintCmd2(gpa, opt_cwd, null, argv);
-}
-
-pub fn allocPrintCmd2(
-    gpa: Allocator,
-    opt_cwd: ?[]const u8,
-    opt_env: ?*const std.process.EnvMap,
+    opt_env: ?struct {
+        child: *const std.process.Environ.Map,
+        parent: *const std.process.Environ.Map,
+    },
     argv: []const []const u8,
 ) Allocator.Error![]u8 {
     const shell = struct {
@@ -781,13 +777,11 @@ pub fn allocPrintCmd2(
     const writer = &aw.writer;
     if (opt_cwd) |cwd| writer.print("cd {s} && ", .{cwd}) catch return error.OutOfMemory;
     if (opt_env) |env| {
-        var process_env_map = std.process.getEnvMap(gpa) catch std.process.EnvMap.init(gpa);
-        defer process_env_map.deinit();
-        var it = env.iterator();
+        var it = env.child.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
             const value = entry.value_ptr.*;
-            if (process_env_map.get(key)) |process_value| {
+            if (env.parent.get(key)) |process_value| {
                 if (std.mem.eql(u8, value, process_value)) continue;
             }
             writer.print("{s}=", .{key}) catch return error.OutOfMemory;
@@ -823,22 +817,27 @@ pub fn cacheHitAndWatch(s: *Step, man: *Build.Cache.Manifest) !bool {
     return is_hit;
 }
 
-fn failWithCacheError(s: *Step, man: *const Build.Cache.Manifest, err: Build.Cache.Manifest.HitError) error{ OutOfMemory, MakeFailed } {
+fn failWithCacheError(
+    s: *Step,
+    man: *const Build.Cache.Manifest,
+    err: Build.Cache.Manifest.HitError,
+) error{ OutOfMemory, Canceled, MakeFailed } {
     switch (err) {
         error.CacheCheckFailed => switch (man.diagnostic) {
             .none => unreachable,
-            .manifest_create, .manifest_read, .manifest_lock => |e| return s.fail("failed to check cache: {s} {s}", .{
-                @tagName(man.diagnostic), @errorName(e),
+            .manifest_create, .manifest_read, .manifest_lock => |e| return s.fail("failed to check cache: {t} {t}", .{
+                man.diagnostic, e,
             }),
             .file_open, .file_stat, .file_read, .file_hash => |op| {
                 const pp = man.files.keys()[op.file_index].prefixed_path;
                 const prefix = man.cache.prefixes()[pp.prefix].path orelse "";
-                return s.fail("failed to check cache: '{s}{c}{s}' {s} {s}", .{
-                    prefix, std.fs.path.sep, pp.sub_path, @tagName(man.diagnostic), @errorName(op.err),
+                return s.fail("failed to check cache: '{s}{c}{s}' {t} {t}", .{
+                    prefix, std.fs.path.sep, pp.sub_path, man.diagnostic, op.err,
                 });
             },
         },
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         error.InvalidFormat => return s.fail("failed to check cache: invalid manifest file format", .{}),
     }
 }
@@ -848,7 +847,7 @@ fn failWithCacheError(s: *Step, man: *const Build.Cache.Manifest, err: Build.Cac
 pub fn writeManifest(s: *Step, man: *Build.Cache.Manifest) !void {
     if (s.test_results.isSuccess()) {
         man.writeManifest() catch |err| {
-            try s.addError("unable to write cache manifest: {s}", .{@errorName(err)});
+            try s.addError("unable to write cache manifest: {t}", .{err});
         };
     }
 }
@@ -895,7 +894,7 @@ pub fn addWatchInput(step: *Step, lazy_file: Build.LazyPath) Allocator.Error!voi
             try addWatchInputFromPath(step, .{
                 .root_dir = .{
                     .path = null,
-                    .handle = std.fs.cwd(),
+                    .handle = Io.Dir.cwd(),
                 },
                 .sub_path = std.fs.path.dirname(path_string) orelse "",
             }, std.fs.path.basename(path_string));
@@ -920,7 +919,7 @@ pub fn addDirectoryWatchInput(step: *Step, lazy_directory: Build.LazyPath) Alloc
             try addDirectoryWatchInputFromPath(step, .{
                 .root_dir = .{
                     .path = null,
-                    .handle = std.fs.cwd(),
+                    .handle = Io.Dir.cwd(),
                 },
                 .sub_path = path_string,
             });
@@ -983,14 +982,17 @@ pub fn reset(step: *Step, gpa: Allocator) void {
 }
 
 /// Implementation detail of file watching. Prepares the step for being re-evaluated.
-pub fn recursiveReset(step: *Step, gpa: Allocator) void {
-    assert(step.state != .precheck_done);
+/// Returns `true` if the step was newly invalidated, `false` if it was already invalidated.
+pub fn invalidateResult(step: *Step, gpa: Allocator) bool {
+    if (step.state == .precheck_done) return false;
+    assert(step.pending_deps == 0);
     step.state = .precheck_done;
     step.reset(gpa);
-    for (step.dependants.items) |dep| {
-        if (dep.state == .precheck_done) continue;
-        dep.recursiveReset(gpa);
+    for (step.dependants.items) |dependant| {
+        _ = dependant.invalidateResult(gpa);
+        dependant.pending_deps += 1;
     }
+    return true;
 }
 
 test {
@@ -1004,7 +1006,6 @@ test {
     _ = ObjCopy;
     _ = Compile;
     _ = Options;
-    _ = RemoveDir;
     _ = Run;
     _ = TranslateC;
     _ = WriteFile;

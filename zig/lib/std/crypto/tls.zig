@@ -32,7 +32,6 @@
 
 const std = @import("../std.zig");
 const Tls = @This();
-const net = std.net;
 const mem = std.mem;
 const crypto = std.crypto;
 const assert = std.debug.assert;
@@ -134,6 +133,8 @@ pub const ExtensionType = enum(u16) {
     signature_algorithms_cert = 50,
     /// RFC 8446
     key_share = 51,
+    /// RFC 9000
+    quic_transport_parameters = 57,
 
     _,
 };
@@ -606,7 +607,7 @@ pub fn array(
     const elem_size = @divExact(@bitSizeOf(Elem), 8);
     var arr: [len_size + elem_size * elems.len]u8 = undefined;
     std.mem.writeInt(Len, arr[0..len_size], @intCast(elem_size * elems.len), .big);
-    const ElemInt = @Type(.{ .int = .{ .signedness = .unsigned, .bits = @bitSizeOf(Elem) } });
+    const ElemInt = @Int(.unsigned, @bitSizeOf(Elem));
     for (0.., @as([elems.len]Elem, elems)) |index, elem| {
         std.mem.writeInt(
             ElemInt,

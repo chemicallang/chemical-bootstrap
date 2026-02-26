@@ -95,7 +95,7 @@ if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
-rem Build an x86_64-windows-msvc zig using msvc, linking against LLVM/Clang/LLD/zlib built by msvc
+@REM rem Build an x86_64-windows-msvc zig using msvc, linking against LLVM/Clang/LLD/zlib built by msvc
 @REM mkdir "%ROOTDIR%%OUTDIR%\build-zig-host"
 @REM cd "%ROOTDIR%%OUTDIR%\build-zig-host"
 @REM cmake "%ROOTDIR%/zig" ^
@@ -153,6 +153,7 @@ rem Build an x86_64-windows-msvc zig using msvc, linking against LLVM/Clang/LLD/
 @REM   --name zstd ^
 @REM   -target %TARGET% ^
 @REM   -mcpu=%MCPU% ^
+@REM   -fno-sanitize-c ^
 @REM   -fstrip ^
 @REM   -OReleaseFast ^
 @REM   -lc ^
@@ -270,5 +271,5 @@ rem Build an x86_64-windows-msvc zig using msvc, linking against LLVM/Clang/LLD/
 @REM   -Dcpu="%MCPU%" ^
 @REM   -Dversion-string="%ZIG_VERSION%"
 @REM if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
-@REM 
+
 popd
